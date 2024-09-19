@@ -3,7 +3,7 @@
 [Datavyu](http://datavyu.org/) is an open-source research tool that integrates and displays all kinds of data, letting you discover the big picture while remaining connected with raw data. Datavyu will let you build and organize interpretations, and will assist with analysis.
 
 ## Download and Use Datavyu
-You can find binaries of Datavyu available for Windows and OSX on [the Datavyu.org download page](http://datavyu.org/download/).
+You can find binaries of Datavyu available for Windows and OSX on [the release page]([http://datavyu.org/download/](https://github.com/databrary/datavyu/releases)).
 
 ## Development Requirements
 
