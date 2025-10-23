@@ -13,6 +13,7 @@ jobs:
         os: [macos-13, windows-latest]
 
     env:
+      # JavaFX 8 打包对内存比较敏感，给一点余量
       MAVEN_FLAGS: "-B -ntp"
       MAVEN_OPTS: >-
         -Xmx2g
@@ -21,11 +22,15 @@ jobs:
         -Dawt.useSystemAAFontSettings=lcd
         -Dorg.apache.maven.wagon.httpconnectionManager.ttl=120000
         -Dorg.apache.maven.wagon.http.retryHandler.count=2
+      # 你的主类/应用名（如和代码不符请改这两行）
+      APP_MAIN: "org.datavyu.Datavyu"
+      APP_NAME: "Datavyu"
+      APP_VENDOR: "Datavyu"
 
     steps:
       - uses: actions/checkout@v4
 
-      # ---- JDK 8 + JavaFX（关键）----
+      # 1) JDK8 + JavaFX（必须带 FX；Liberica 最稳）
       - name: Set up JDK 8 (Liberica with JavaFX)
         uses: actions/setup-java@v4
         with:
@@ -39,16 +44,16 @@ jobs:
         run: |
           java -version
           echo "JAVA_HOME=$JAVA_HOME"
-          ls -l "$JAVA_HOME/lib/ant-javafx.jar" || true
+          test -f "$JAVA_HOME/lib/ant-javafx.jar" && echo "ant-javafx.jar OK" || (echo "ant-javafx.jar MISSING" && exit 1)
 
-      # ---- Windows 打原生安装包需要 Inno Setup / WiX ----
+      # 2) Windows 打原生安装包需要工具（exe/msi）
       - name: Install Windows packaging tools (InnoSetup + WiX)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install -y innosetup wixtoolset
 
-      # ---- Maven mirrors：阿里云优先 + Central 兜底 + 拦截慢仓库 ----
+      # 3) Maven 源：阿里云优先 + Central 兜底 + 拦截慢/失效仓库
       - name: Set up Maven mirrors
         shell: bash
         run: |
@@ -58,13 +63,11 @@ jobs:
                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                     xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
             <mirrors>
-              <!-- Aliyun mirror for central, but don't mirror our own apache-central fallback -->
               <mirror>
                 <id>aliyun-central</id>
                 <mirrorOf>central,!apache-central</mirrorOf>
                 <url>https://maven.aliyun.com/repository/central</url>
               </mirror>
-              <!-- Fast-fail old/slow repos to Central -->
               <mirror>
                 <id>fast-fail-others</id>
                 <mirrorOf>rubygems-releases,bintray-datavyu-datavyu</mirrorOf>
@@ -88,8 +91,8 @@ jobs:
           </settings>
           XML
 
-      # ---- 可选：把 vendor/ 下已有的私有 JAR 预装到本地仓库 ----
-      - name: Preinstall vendor jars (optional, if present)
+      # 4) （可选）把你放在 repo 的 vendor/* 私有 JAR 预装到本地仓库（按平台）
+      - name: Preinstall vendor jars (optional)
         shell: bash
         run: |
           set -e
@@ -97,65 +100,80 @@ jobs:
           if [ "$RUNNER_OS" = "macOS" ]; then CLASSIFIER="mac"; fi
           if [ "$RUNNER_OS" = "Windows" ]; then CLASSIFIER="win"; fi
 
-          # sdl-libs（按需）
-          if [ -f "vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar" ]; then
-            mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
-              -Dfile="vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar" \
-              -DgroupId=org.datavyu -DartifactId=sdl-libs \
-              -Dversion=2.0.9 -Dpackaging=jar -Dclassifier="${CLASSIFIER}"
+          for f in vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar \
+                   vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar ; do
+            if [ -f "$f" ]; then
+              AID=$(basename "$f" | sed -E 's/-[0-9].*//')   # 简单取 artifactId
+              VER=$(basename "$f" | sed -E 's/.*-([0-9][^.]*(\.[0-9]+)*)[^/]*\.jar/\1/')
+              mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+                -Dfile="$f" -DgroupId=org.datavyu -DartifactId="$AID" \
+                -Dversion="$VER" -Dpackaging=jar -Dclassifier="${CLASSIFIER}"
+            fi
+          done
+
+          # mac 专属 quaqua（如果你把 jar 放进了 vendor/）
+          if [ "$RUNNER_OS" = "macOS" ]; then
+            if [ -f vendor/quaqua-osx64-7.0.1.jar ]; then
+              mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+                -Dfile=vendor/quaqua-osx64-7.0.1.jar \
+                -DgroupId=org.datavyu -DartifactId=quaqua-osx64 \
+                -Dversion=7.0.1 -Dpackaging=jar
+            fi
+            if [ -f vendor/quaqua-filechooser-only-7.0.1.jar ]; then
+              mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+                -Dfile=vendor/quaqua-filechooser-only-7.0.1.jar \
+                -DgroupId=org.datavyu -DartifactId=quaqua-filechooser-only \
+                -Dversion=7.0.1 -Dpackaging=jar
+            fi
           fi
 
-          # ffmpeg-plugin（按需）
-          if [ -f "vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar" ]; then
-            mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
-              -Dfile="vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar" \
-              -DgroupId=org.datavyu -DartifactId=ffmpeg-plugin \
-              -Dversion=0.24 -Dpackaging=jar -Dclassifier="${CLASSIFIER}"
-          fi
-
-          # quaqua 仅 mac 需要（按需）
-          if [ "$RUNNER_OS" = "macOS" ] && [ -f "vendor/quaqua-osx64-7.0.1.jar" ]; then
-            mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
-              -Dfile="vendor/quaqua-osx64-7.0.1.jar" \
-              -DgroupId=org.datavyu -DartifactId=quaqua-osx64 \
-              -Dversion=7.0.1 -Dpackaging=jar
-          fi
-          if [ "$RUNNER_OS" = "macOS" ] && [ -f "vendor/quaqua-filechooser-only-7.0.1.jar" ]; then
-            mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
-              -Dfile="vendor/quaqua-filechooser-only-7.0.1.jar" \
-              -DgroupId=org.datavyu -DartifactId=quaqua-filechooser-only \
-              -Dversion=7.0.1 -Dpackaging=jar
-          fi
-
-      # ---- 诊断信息（可保留便于排错）----
+      # 5) 先做依赖诊断（可删）
       - name: Show dependency tree
         shell: bash
         run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U dependency:tree -DoutputType=text
 
-      # ---- 构建 native 安装包（mac: dmg/app；win: exe/msi/zip）----
+      # 6) 强制做 native：mac=dmg，win=exe；并显式指定 mainClass/appName/vendor
       - name: Build native installers
         shell: bash
-        run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -Dmaven.test.skip=true -U clean jfx:native
+        run: |
+          if [ "$RUNNER_OS" = "macOS" ]; then BUNDLE=dmg; else BUNDLE=exe; fi
+          mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -Dmaven.test.skip=true -U clean \
+            jfx:jar jfx:native \
+            -Djavafx.mainClass="${APP_MAIN}" \
+            -Djavafx.appName="${APP_NAME}" \
+            -Djavafx.vendor="${APP_VENDOR}" \
+            -Djavafx.bundleType="${BUNDLE}" \
+            -Djavafx.verbose=true
 
-      # ---- 列出产物，便于确认路径 ----
+      # 7) 列出现有产物
       - name: Inspect outputs
         shell: bash
         run: |
-          echo "== files ==" && find target -maxdepth 5 -type f -print || true
-          echo "== app bundles ==" && find target -maxdepth 5 -type d -name "*.app" -print || true
+          echo "== files ==" && find target -maxdepth 6 -type f -print || true
+          echo "== app bundles ==" && find target -maxdepth 6 -type d -name "*.app" -print || true
 
-      # ---- macOS: 将 .app 压成 .zip（若 POM 没产出 .dmg）----
-      - name: Zip .app bundles (macOS)
+      # 8) 兜底：无论是否生成 dmg/exe，都把 jfx/app 目录打成 zip 便于分发
+      - name: Package jfx appdir (always)
+        if: always()
+        shell: bash
+        run: |
+          if [ -d target/jfx/app ]; then
+            (cd target/jfx/app && zip -r ../../${{ env.APP_NAME }}-${{ runner.os }}-appdir.zip .)
+          fi
+
+      # 9) macOS：把 .app 也 zip 一份；把 .dmg/.pkg 拷到 target 根便于上传
+      - name: Collect native bundles (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          APP_DIRS=$(find target -maxdepth 5 -type d -name "*.app" || true)
+          APP_DIRS=$(find target -maxdepth 6 -type d -name "*.app" || true)
           for d in $APP_DIRS; do
             base=$(basename "$d")
             (cd "$(dirname "$d")" && zip -r "${base}.zip" "$base")
           done
+          find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} target/ \; || true
 
-      # ---- 上传所有可能的产物 ----
+      # 10) 上传所有可能的产物
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
@@ -165,9 +183,10 @@ jobs:
             target/**/*.pkg
             target/**/*.msi
             target/**/*.exe
-            target/**/*.zip
+            target/*-appdir.zip
+            target/**/*.app.zip
             target/jfx/native/**/*
             target/jfx/app/*-jfx.jar
             target/*-jfx.jar
-            target/*.jar
+            target/Datavyu/*.jar
           if-no-files-found: warn
