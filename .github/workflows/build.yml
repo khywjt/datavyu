@@ -10,20 +10,33 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-13, windows-latest]   # ← macOS 用 13（Intel），不是 macos-latest
+        os: [macos-13]  # 先只跑 macOS，Windows 暂时注释以减少变量
+
     steps:
       - uses: actions/checkout@v4
 
       - name: Set up JDK 8 (Zulu)
         uses: actions/setup-java@v4
         with:
-          distribution: zulu            # ← 改为 zulu
+          distribution: zulu
           java-version: '8'
 
-      # （可选）Windows 的原生安装包往往需要 Inno Setup，先装上
-      - name: Install Inno Setup (Windows)
-        if: runner.os == 'Windows'
-        run: choco install innosetup -y
+      - name: Preinstall SDL libs (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mvn install:install-file \
+            -Dfile=vendor/sdl-libs-2.0.9-mac.jar \
+            -DgroupId=org.datavyu \
+            -DartifactId=sdl-libs \
+            -Dversion=2.0.9 \
+            -Dpackaging=jar \
+            -Dclassifier=mac
+
+      - name: Show effective POM
+        run: mvn -B -U -DforceStdout help:effective-pom
+
+      - name: Show dependency tree
+        run: mvn -B -U dependency:tree -DoutputType=text
 
       - name: Build native installers
         run: mvn -Dmaven.test.skip=true -U clean jfx:native
@@ -37,3 +50,4 @@ jobs:
           path: |
             target/jfx/native/**/*
             target/*.jar
+
