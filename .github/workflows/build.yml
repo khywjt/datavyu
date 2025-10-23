@@ -2,7 +2,7 @@ name: Build Datavyu
 
 on:
   push:
-    branches: [ main, master ]   # 需要根据你的默认分支修改
+    branches: [ main, master ]  # 视你的默认分支调整
   pull_request:
 
 jobs:
@@ -10,26 +10,30 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-latest, windows-latest]
-
+        os: [macos-13, windows-latest]   # ← macOS 用 13（Intel），不是 macos-latest
     steps:
-    - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Set up JDK 8
-      uses: actions/setup-java@v4
-      with:
-        distribution: temurin
-        java-version: '8'
+      - name: Set up JDK 8 (Zulu)
+        uses: actions/setup-java@v4
+        with:
+          distribution: zulu            # ← 改为 zulu
+          java-version: '8'
 
-    - name: Build native installers
-      run: mvn -Dmaven.test.skip=true -U clean jfx:native
-      env:
-        MAVEN_OPTS: "-Xmx1g -Dfile.encoding=UTF-8 -Dswing.aatext=true -Dawt.useSystemAAFontSettings=lcd"
+      # （可选）Windows 的原生安装包往往需要 Inno Setup，先装上
+      - name: Install Inno Setup (Windows)
+        if: runner.os == 'Windows'
+        run: choco install innosetup -y
 
-    - name: Upload build artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: datavyu-${{ runner.os }}
-        path: |
-          target/jfx/native/**/*
-          target/*.jar
+      - name: Build native installers
+        run: mvn -Dmaven.test.skip=true -U clean jfx:native
+        env:
+          MAVEN_OPTS: "-Xmx1g -Dfile.encoding=UTF-8 -Dswing.aatext=true -Dawt.useSystemAAFontSettings=lcd"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: datavyu-${{ runner.os }}
+          path: |
+            target/jfx/native/**/*
+            target/*.jar
