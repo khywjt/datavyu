@@ -1,0 +1,35 @@
+name: Build Datavyu
+
+on:
+  push:
+    branches: [ main, master ]   # 需要根据你的默认分支修改
+  pull_request:
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [macos-latest, windows-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Set up JDK 8
+      uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: '8'
+
+    - name: Build native installers
+      run: mvn -Dmaven.test.skip=true -U clean jfx:native
+      env:
+        MAVEN_OPTS: "-Xmx1g -Dfile.encoding=UTF-8 -Dswing.aatext=true -Dawt.useSystemAAFontSettings=lcd"
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: datavyu-${{ runner.os }}
+        path: |
+          target/jfx/native/**/*
+          target/*.jar
