@@ -38,6 +38,23 @@ jobs:
       - name: Show dependency tree
         run: mvn -B -U dependency:tree -DoutputType=text
 
+      - name: Set up Maven mirror for faster downloads
+        run: |
+          mkdir -p ~/.m2
+          echo '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
+                                    https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <mirrors>
+              <mirror>
+                <id>aliyunmaven</id>
+                <mirrorOf>central</mirrorOf>
+                <name>Aliyun Maven</name>
+                <url>https://maven.aliyun.com/repository/central</url>
+              </mirror>
+            </mirrors>
+          </settings>' > ~/.m2/settings.xml
+
       - name: Build native installers
         run: mvn -Dmaven.test.skip=true -U clean jfx:native
         env:
