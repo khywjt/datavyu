@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # 1) 必须是 JDK 8 + JavaFX（Liberica jdk+fx 带 javapackager）
+      # JDK8 + JavaFX（必须带 FX；Liberica 自带 javapackager/ant-javafx.jar）
       - name: Set up JDK 8 (Liberica with JavaFX)
         uses: actions/setup-java@v4
         with:
@@ -37,7 +37,6 @@ jobs:
           java-package: jdk+fx
           cache: maven
 
-      # 关键校验：javapackager 与 ant-javafx.jar 都要在
       - name: Verify JavaFX packager tools
         shell: bash
         run: |
@@ -47,7 +46,7 @@ jobs:
           test -x "$JAVA_HOME/bin/javapackager" && echo "✔ javapackager OK" || (echo "✘ javapackager MISSING" && exit 1)
           test -f "$JAVA_HOME/lib/ant-javafx.jar" && echo "✔ ant-javafx.jar OK" || (echo "✘ ant-javafx.jar MISSING" && exit 1)
 
-      # Windows 原生安装器所需工具
+      # Windows 打原生安装包需要工具
       - name: Install Windows packaging tools (InnoSetup + WiX)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -92,7 +91,7 @@ jobs:
           </settings>
           XML
 
-      # 可选：预装 vendor/ 下的私有 JAR（按平台 classifier）
+      # （可选）预装 vendor/* 私有 JAR（按平台 classifier）
       - name: Preinstall vendor jars (optional)
         shell: bash
         run: |
@@ -126,22 +125,49 @@ jobs:
             fi
           fi
 
-      # 依赖树（诊断用）
-      - name: Show dependency tree
+      # —— 测试阶段 ————————————————————————————————————————————
+
+      # 准备测试数据：把 src/test/resources/IO 拷到项目根，满足相对路径 IO/...
+      - name: Prepare test data (copy IO to project root)
         shell: bash
-        run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U dependency:tree -DoutputType=text
+        run: |
+          set -e
+          if [ -d src/test/resources/IO ]; then
+            rm -rf IO
+            cp -a src/test/resources/IO .
+            echo "Copied src/test/resources/IO -> ./IO"
+            ls -l IO | head -n 50
+          else
+            echo "No src/test/resources/IO found"
+          fi
 
-      # 先产出 jfx/app（打包器会在此基础上做 native）
+      # 运行测试（失败时上传报告并终止）
+      - name: Run tests
+        shell: bash
+        run: |
+          set -e
+          mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U test
+
+      - name: Upload surefire reports (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports-${{ runner.os }}
+          path: target/surefire-reports/**
+          if-no-files-found: ignore
+
+      # —— 打包阶段（跳过测试，避免 jfx:native 再次触发测试）———————————————
+
+      # 先产出 appdir（供 bundler 使用）
       - name: Build appdir (no tests)
-        run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -Dmaven.test.skip=true -U clean jfx:jar
+        run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -DskipTests -Dmaven.test.skip=true -Dtest.skip=true -U clean jfx:jar
 
-      # macOS：明确把 runtime 传给 bundler，生成 DMG/PKG；无产物则失败
+      # macOS：明确传入 runtime，生成 DMG/PKG；无产物则失败
       - name: Build DMG/PKG (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -e
-          # 关键：计算 runtime 目录（优先 JRE，其次 JDK 根）
           if [ -d "$JAVA_HOME/jre" ]; then
             RUNTIME_DIR="$JAVA_HOME/jre"
           else
@@ -149,11 +175,11 @@ jobs:
           fi
           echo "Using runtime: $RUNTIME_DIR"
 
-          # 关键：把 runtime 通过 bundlerArgs 传给插件；仅启用 DMG/PKG；禁用签名
           mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
-            -Djfx.native=true \
-            -Djfx.native.bundlers="DMG Installer,PKG Installer" \
-            -Djfx.native.bundlerArgs="runtime,${RUNTIME_DIR},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" \
+            -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
+            -Djavafx.native=true \
+            -Djavafx.native.bundlers="DMG Installer,PKG Installer" \
+            -Djavafx.native.bundlerArgs="runtime,${RUNTIME_DIR},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" \
             -Djavafx.mainClass="${APP_MAIN}" \
             -Djavafx.appName="${APP_NAME}" \
             -Djavafx.vendor="${APP_VENDOR}" \
@@ -161,7 +187,6 @@ jobs:
             jfx:native
 
           echo "== produced DMG/PKG =="
-          # 没产出就报错退出
           FOUND=$(find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | wc -l | tr -d ' ')
           if [ "$FOUND" = "0" ]; then
             echo "✘ No DMG/PKG produced. Failing the build."
@@ -169,15 +194,16 @@ jobs:
           fi
           find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) -print
 
-      # Windows：启用 EXE / MSI；无产物则失败
+      # Windows：EXE/MSI；无产物则失败
       - name: Build EXE/MSI (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
           mvn $env:MAVEN_FLAGS `
-            -Djfx.native=true `
-            -Djfx.native.bundlers="EXE Installer,MSI Installer" `
+            -DskipTests -Dmaven.test.skip=true -Dtest.skip=true `
+            -Djavafx.native=true `
+            -Djavafx.native.bundlers="EXE Installer,MSI Installer" `
             -Djavafx.mainClass="$env:APP_MAIN" `
             -Djavafx.appName="$env:APP_NAME" `
             -Djavafx.vendor="$env:APP_VENDOR" `
@@ -200,7 +226,7 @@ jobs:
           echo "== files ==" && find target -maxdepth 6 -type f -print || true
           echo "== app bundles ==" && find target -maxdepth 6 -type d -name "*.app" -print || true
 
-      # 兜底：总是打一个 appdir.zip 以便人工排查
+      # 兜底：总是把 appdir 打一个 zip，便于人工排查/手动运行
       - name: Package jfx appdir (always)
         if: always()
         shell: bash
@@ -209,7 +235,7 @@ jobs:
             (cd target/jfx/app && zip -r ../../${{ env.APP_NAME }}-${{ runner.os }}-appdir.zip .)
           fi
 
-      # 上传产物
+      # 上传所有产物
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
