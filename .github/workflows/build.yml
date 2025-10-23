@@ -30,8 +30,10 @@ jobs:
           distribution: zulu
           java-version: '8'
           cache: 'maven'
+      - name: Show remote repositories
+        run: mvn -s "$HOME/.m2/settings.xml" -B help:effective-pom | sed -n '/<repositories>/,/<\/repositories>/p'
 
-      - name: Set up Maven mirrors (Aliyun)
+      - name: Set up Maven mirrors (Central only; block slow rubygems)
         run: |
           mkdir -p "$HOME/.m2"
           cat > "$HOME/.m2/settings.xml" <<'XML'
@@ -39,15 +41,31 @@ jobs:
                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                     xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
             <mirrors>
+              <!-- 只镜像 Central 到阿里云 -->
               <mirror>
-                <id>aliyun-all</id>
-                <mirrorOf>*</mirrorOf>
-                <name>Aliyun All</name>
+                <id>aliyun-central</id>
+                <mirrorOf>central</mirrorOf>
+                <name>Aliyun Central</name>
+                <url>https://maven.aliyun.com/repository/central</url>
+              </mirror>
+              <!-- 可选：jcenter/gradle-plugin 也走阿里云（按需保留） -->
+              <mirror>
+                <id>aliyun-public</id>
+                <mirrorOf>jcenter,gradle-plugin</mirrorOf>
+                <name>Aliyun Public</name>
                 <url>https://maven.aliyun.com/repository/public</url>
+              </mirror>
+              <!-- 关键：让 POM 里的 rubygems-releases 不再命中 otto.takari.io（直接映射到 Central，快速失败） -->
+              <mirror>
+                <id>rubygems-fast-fail</id>
+                <mirrorOf>rubygems-releases</mirrorOf>
+                <name>Map rubygems-releases to Central</name>
+                <url>https://repo1.maven.org/maven2</url>
               </mirror>
             </mirrors>
           </settings>
           XML
+
 
       - name: Preinstall SDL libs (macOS)
         if: runner.os == 'macOS'
