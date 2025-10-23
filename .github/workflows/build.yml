@@ -175,34 +175,66 @@ jobs:
         if: runner.os == 'macOS'
         shell: bash
         run: |
-          set -e
-          # 计算 runtime；修复 "Cannot determine which JRE/JDK"
-          if [ -d "$JAVA_HOME/jre" ]; then
-            RUNTIME_DIR="$JAVA_HOME/jre"
-          else
-            RUNTIME_DIR="$JAVA_HOME"
-          fi
-          echo "Using runtime: $RUNTIME_DIR"
-
-          # 跳过测试 + 指定 bundlers + 传入 runtime + 关闭签名
+          set -euo pipefail
+          echo "JAVA_HOME=$JAVA_HOME"
+          # 对于 Liberica JDK8（带 FX），这里就是 Contents/Home；符合打包器要求
+          RUNTIME_DIR="$JAVA_HOME"
+      
+          echo "== Verify packager tools =="
+          test -x "$JAVA_HOME/bin/javapackager" && "$JAVA_HOME/bin/javapackager" -version || { echo "javapackager missing"; exit 1; }
+          test -f "$JAVA_HOME/lib/ant-javafx.jar" && echo "ant-javafx.jar OK" || { echo "ant-javafx.jar missing"; exit 1; }
+      
+          echo "== Show jfx appdir inputs =="
+          ls -la target/jfx/app || true
+          find target/jfx/app -maxdepth 2 -type f -name "*-jfx.jar" -print || true
+      
+          echo "== Try via javafx-maven-plugin =="
           mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
-            -Djfx.native=true \
-            -Djfx.native.bundlers="DMG Installer,PKG Installer" \
-            -Djfx.native.bundlerArgs="runtime,${RUNTIME_DIR},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" \
             -Djavafx.mainClass="${APP_MAIN}" \
             -Djavafx.appName="${APP_NAME}" \
             -Djavafx.vendor="${APP_VENDOR}" \
             -Djavafx.verbose=true \
+            -Djavafx.bundlers="DMG Installer,PKG Installer,Mac Application Image" \
+            -Djavafx.bundlerArgs="runtime,${RUNTIME_DIR},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" \
+            -Djavafx.runtime="${RUNTIME_DIR}" \
             jfx:native
-
-          echo "== produced DMG/PKG =="
+      
+          echo "== produced DMG/PKG after plugin =="
           FOUND=$(find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | wc -l | tr -d ' ')
           if [ "$FOUND" = "0" ]; then
-            echo "✘ No DMG/PKG produced. Failing the build."
-            exit 1
+            echo "No DMG/PKG produced by plugin. Fallback to javapackager CLI ..."
+            # 取到 jfx 打包好的可运行 jar（形如 Datavyu/datavyu-*-jfx.jar）
+            APPDIR="target/jfx/app"
+            JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1)
+            if [ -z "$JFXJAR" ]; then
+              echo "Cannot find *-jfx.jar under $APPDIR/Datavyu"; exit 1
+            fi
+      
+            mkdir -p target/packager
+            "$JAVA_HOME/bin/javapackager" -deploy \
+              -native dmg \
+              -name "${APP_NAME}" \
+              -appclass "${APP_MAIN}" \
+              -srcdir "$(dirname "$JFXJAR")" \
+              -srcfiles "$(basename "$JFXJAR")" \
+              -outdir target/packager \
+              -outfile "${APP_NAME}" \
+              -Bidentifier=org.datavyu \
+              -Bmac.sign=false \
+              -Bruntime="${RUNTIME_DIR}"
+      
+            # 把生成好的 DMG/PKG 收集到 target 方便上传
+            find target/packager -type f \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} target/ \; || true
           fi
+      
+          FINAL=$(find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | wc -l | tr -d ' ')
+          if [ "$FINAL" = "0" ]; then
+            echo "✘ Still no DMG/PKG produced. Failing the build."; exit 1
+          fi
+          echo "== FINAL DMG/PKG =="
           find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) -print
+
 
       # ============================== Windows: 产出 EXE/MSI ==============================
       - name: Build EXE/MSI (Windows)
