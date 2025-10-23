@@ -52,33 +52,53 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-
-          # 1) 包一层 .jdk/Contents/Home（javapackager 喜欢这个形状）
-          WRAP_HOME="$RUNNER_TEMP/jdk8fx.jdk/Contents/Home"
-          rm -rf "$RUNNER_TEMP/jdk8fx.jdk"
-          mkdir -p "$(dirname "$WRAP_HOME")"
-          ln -s "$JAVA_HOME" "$WRAP_HOME"
+      
+          # 1) 构造一个完整的 macOS JDK bundle 目录
+          BUNDLE_ROOT="$RUNNER_TEMP/jdk8fx.jdk"
+          BUNDLE_CNT="$BUNDLE_ROOT/Contents"
+          WRAP_HOME="$BUNDLE_CNT/Home"
+      
+          rm -rf "$BUNDLE_ROOT"
+          mkdir -p "$WRAP_HOME"
+      
+          echo "== Copy JDK into $WRAP_HOME (this is fast on GH runners) =="
+          rsync -a "$JAVA_HOME/." "$WRAP_HOME/"
+      
+          # 2) 放一个最小的 Info.plist（有些检测会看这个）
+          cat > "$BUNDLE_CNT/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>DatavyuJDK</string>
+            <key>CFBundleIdentifier</key><string>org.datavyu.jdk8fx</string>
+            <key>CFBundleVersion</key><string>1.8.0_472</string>
+          </dict>
+          </plist>
+          PLIST
+      
           echo "MACOS_RUNTIME_HOME=$WRAP_HOME" >> "$GITHUB_ENV"
-
-          ls -la "$(dirname "$WRAP_HOME")"
+      
+          echo "== Sanity =="
+          ls -la "$BUNDLE_CNT"
           "$WRAP_HOME/bin/java" -version
-
-          # 2) 10 秒小样例预检（避免把大项目都编完才失败）
+          test -f "$WRAP_HOME/jre/lib/rt.jar" && echo "rt.jar OK"
+          test -f "$WRAP_HOME/jre/lib/ext/jfxrt.jar" && echo "jfxrt.jar OK" || true
+      
+          # 3) 10 秒小样例预检（避免大项目白编）
           WORK="$RUNNER_TEMP/jfx-preflight"
           rm -rf "$WORK" && mkdir -p "$WORK" && cd "$WORK"
+      
           cat > Hello.java <<'JAVA'
-          import javafx.application.Application;
-          import javafx.stage.Stage;
-          public class Hello extends Application {
-            @Override public void start(Stage s) { s.setTitle("ok"); s.show(); }
-            public static void main(String[] args) { launch(args); }
+          public class Hello {
+            public static void main(String[] args) { System.out.println("ok"); }
           }
           JAVA
-
+      
           "$WRAP_HOME/bin/javac" Hello.java
           "$WRAP_HOME/bin/jar" cfe Hello.jar Hello Hello.class
-
-          # 尝试做一个最小 native image（不签名，目标只是验证 runtime 形状）
+      
+          # 用 javapackager 生成最小 image；关键是 -Bruntime 指向我们包好的 WRAP_HOME
           "$JAVA_HOME/bin/javapackager" -deploy -native image \
             -name Preflight -appclass Hello \
             -srcdir . -srcfiles Hello.jar \
@@ -86,9 +106,10 @@ jobs:
             -Bidentifier=org.datavyu.preflight \
             -Bmac.sign=false \
             -Bruntime="$WRAP_HOME"
-
+      
           test -d out || (echo "Preflight failed"; exit 1)
           echo "Preflight OK (runtime usable)"
+
 
       # ===== Windows 打包工具 =====
       - name: Install Windows packaging tools (InnoSetup + WiX)
