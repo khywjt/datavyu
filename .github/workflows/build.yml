@@ -25,11 +25,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-java@v4
+      - name: Set up JDK 8 (Liberica with JavaFX)
+        uses: actions/setup-java@v4
         with:
-          distribution: zulu
+          distribution: liberica
           java-version: '8'
-          cache: 'maven'
+          java-package: jdk+fx       # 关键：带 JavaFX 的 JDK8
+          cache: maven
+      - name: Verify JavaFX tools
+        run: |
+          java -version
+          echo "JAVA_HOME=$JAVA_HOME"
+          ls -l "$JAVA_HOME/lib/ant-javafx.jar" || true
+
       - name: Show remote repositories
         run: mvn -s "$HOME/.m2/settings.xml" -B help:effective-pom | sed -n '/<repositories>/,/<\/repositories>/p'
 
