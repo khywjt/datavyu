@@ -455,6 +455,11 @@
                         <argument>-Xmx1g</argument>
                     </jvmArgs>
                     <appName>datavyu</appName>
+                        <!-- 关键：把 runtime 传给 javapackager -->
+                    <bundleArguments>
+                        <!-- 让路径来自一个属性，便于 CI 注入或跨平台切换 -->
+                        <runtime>${jfx.runtime}</runtime>
+                      </bundleArguments>
                 </configuration>
             </plugin>
 
