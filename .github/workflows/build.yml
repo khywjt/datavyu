@@ -10,7 +10,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-13]
+        os: [macos-13, windows-latest]
 
     env:
       MAVEN_FLAGS: "-B -ntp"
@@ -25,23 +25,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ---- JDK 8 + JavaFX（关键）----
       - name: Set up JDK 8 (Liberica with JavaFX)
         uses: actions/setup-java@v4
         with:
           distribution: liberica
           java-version: '8'
-          java-package: jdk+fx       # 关键：带 JavaFX 的 JDK8
+          java-package: jdk+fx
           cache: maven
+
       - name: Verify JavaFX tools
+        shell: bash
         run: |
           java -version
           echo "JAVA_HOME=$JAVA_HOME"
           ls -l "$JAVA_HOME/lib/ant-javafx.jar" || true
 
-      - name: Show remote repositories
-        run: mvn -s "$HOME/.m2/settings.xml" -B help:effective-pom | sed -n '/<repositories>/,/<\/repositories>/p'
+      # ---- Windows 打原生安装包需要 Inno Setup / WiX ----
+      - name: Install Windows packaging tools (InnoSetup + WiX)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          choco install -y innosetup wixtoolset
 
-      - name: Set up Maven mirrors (Central only; block slow rubygems)
+      # ---- Maven mirrors：阿里云优先 + Central 兜底 + 拦截慢仓库 ----
+      - name: Set up Maven mirrors
+        shell: bash
         run: |
           mkdir -p "$HOME/.m2"
           cat > "$HOME/.m2/settings.xml" <<'XML'
@@ -49,55 +58,116 @@ jobs:
                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                     xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
             <mirrors>
-              <!-- 只镜像 Central 到阿里云 -->
+              <!-- Aliyun mirror for central, but don't mirror our own apache-central fallback -->
               <mirror>
                 <id>aliyun-central</id>
-                <mirrorOf>central</mirrorOf>
-                <name>Aliyun Central</name>
+                <mirrorOf>central,!apache-central</mirrorOf>
                 <url>https://maven.aliyun.com/repository/central</url>
               </mirror>
-              <!-- 可选：jcenter/gradle-plugin 也走阿里云（按需保留） -->
+              <!-- Fast-fail old/slow repos to Central -->
               <mirror>
-                <id>aliyun-public</id>
-                <mirrorOf>jcenter,gradle-plugin</mirrorOf>
-                <name>Aliyun Public</name>
-                <url>https://maven.aliyun.com/repository/public</url>
-              </mirror>
-              <!-- 关键：让 POM 里的 rubygems-releases 不再命中 otto.takari.io（直接映射到 Central，快速失败） -->
-              <mirror>
-                <id>rubygems-fast-fail</id>
-                <mirrorOf>rubygems-releases</mirrorOf>
-                <name>Map rubygems-releases to Central</name>
-                <url>https://repo1.maven.org/maven2</url>
+                <id>fast-fail-others</id>
+                <mirrorOf>rubygems-releases,bintray-datavyu-datavyu</mirrorOf>
+                <url>https://repo.maven.apache.org/maven2</url>
               </mirror>
             </mirrors>
+            <profiles>
+              <profile>
+                <id>extra-repos</id>
+                <activation><activeByDefault>true</activeByDefault></activation>
+                <repositories>
+                  <repository>
+                    <id>apache-central</id>
+                    <url>https://repo.maven.apache.org/maven2</url>
+                    <releases><enabled>true</enabled><updatePolicy>never</updatePolicy></releases>
+                    <snapshots><enabled>false</enabled></snapshots>
+                  </repository>
+                </repositories>
+              </profile>
+            </profiles>
           </settings>
           XML
 
-
-      - name: Preinstall SDL libs (macOS)
-        if: runner.os == 'macOS'
+      # ---- 可选：把 vendor/ 下已有的私有 JAR 预装到本地仓库 ----
+      - name: Preinstall vendor jars (optional, if present)
+        shell: bash
         run: |
-          mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS install:install-file \
-            -Dfile=vendor/sdl-libs-2.0.9-mac.jar \
-            -DgroupId=org.datavyu \
-            -DartifactId=sdl-libs \
-            -Dversion=2.0.9 \
-            -Dpackaging=jar \
-            -Dclassifier=mac
+          set -e
+          CLASSIFIER=""
+          if [ "$RUNNER_OS" = "macOS" ]; then CLASSIFIER="mac"; fi
+          if [ "$RUNNER_OS" = "Windows" ]; then CLASSIFIER="win"; fi
 
-      - name: Show effective POM
-        run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U -DforceStdout help:effective-pom
+          # sdl-libs（按需）
+          if [ -f "vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar" ]; then
+            mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+              -Dfile="vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar" \
+              -DgroupId=org.datavyu -DartifactId=sdl-libs \
+              -Dversion=2.0.9 -Dpackaging=jar -Dclassifier="${CLASSIFIER}"
+          fi
 
+          # ffmpeg-plugin（按需）
+          if [ -f "vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar" ]; then
+            mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+              -Dfile="vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar" \
+              -DgroupId=org.datavyu -DartifactId=ffmpeg-plugin \
+              -Dversion=0.24 -Dpackaging=jar -Dclassifier="${CLASSIFIER}"
+          fi
+
+          # quaqua 仅 mac 需要（按需）
+          if [ "$RUNNER_OS" = "macOS" ] && [ -f "vendor/quaqua-osx64-7.0.1.jar" ]; then
+            mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+              -Dfile="vendor/quaqua-osx64-7.0.1.jar" \
+              -DgroupId=org.datavyu -DartifactId=quaqua-osx64 \
+              -Dversion=7.0.1 -Dpackaging=jar
+          fi
+          if [ "$RUNNER_OS" = "macOS" ] && [ -f "vendor/quaqua-filechooser-only-7.0.1.jar" ]; then
+            mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+              -Dfile="vendor/quaqua-filechooser-only-7.0.1.jar" \
+              -DgroupId=org.datavyu -DartifactId=quaqua-filechooser-only \
+              -Dversion=7.0.1 -Dpackaging=jar
+          fi
+
+      # ---- 诊断信息（可保留便于排错）----
       - name: Show dependency tree
+        shell: bash
         run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U dependency:tree -DoutputType=text
 
+      # ---- 构建 native 安装包（mac: dmg/app；win: exe/msi/zip）----
       - name: Build native installers
+        shell: bash
         run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -Dmaven.test.skip=true -U clean jfx:native
 
-      - uses: actions/upload-artifact@v4
+      # ---- 列出产物，便于确认路径 ----
+      - name: Inspect outputs
+        shell: bash
+        run: |
+          echo "== files ==" && find target -maxdepth 5 -type f -print || true
+          echo "== app bundles ==" && find target -maxdepth 5 -type d -name "*.app" -print || true
+
+      # ---- macOS: 将 .app 压成 .zip（若 POM 没产出 .dmg）----
+      - name: Zip .app bundles (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          APP_DIRS=$(find target -maxdepth 5 -type d -name "*.app" || true)
+          for d in $APP_DIRS; do
+            base=$(basename "$d")
+            (cd "$(dirname "$d")" && zip -r "${base}.zip" "$base")
+          done
+
+      # ---- 上传所有可能的产物 ----
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
         with:
           name: datavyu-${{ runner.os }}
           path: |
+            target/**/*.dmg
+            target/**/*.pkg
+            target/**/*.msi
+            target/**/*.exe
+            target/**/*.zip
             target/jfx/native/**/*
+            target/jfx/app/*-jfx.jar
+            target/*-jfx.jar
             target/*.jar
+          if-no-files-found: warn
