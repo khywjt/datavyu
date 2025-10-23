@@ -2,7 +2,7 @@ name: Build Datavyu
 
 on:
   push:
-    branches: [ main, master ]  # 视你的默认分支调整
+    branches: [ main, master ]
   pull_request:
 
 jobs:
@@ -10,21 +10,80 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [macos-13]  # 先只跑 macOS，Windows 暂时注释以减少变量
+        os: [macos-13]
+
+    env:
+      # 统一 CLI 选项：使用我们写入的 settings.xml、静默传输、Batch 模式
+      MAVEN_CLI_OPTS: "-s $HOME/.m2/settings.xml -B -ntp"
+      MAVEN_OPTS: "-Xmx2g -Dfile.encoding=UTF-8 -Dswing.aatext=true -Dawt.useSystemAAFontSettings=lcd
+                   -Dorg.apache.maven.wagon.httpconnectionManager.ttl=120000
+                   -Dorg.apache.maven.wagon.http.retryHandler.count=2"
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up JDK 8 (Zulu)
+      - name: Set up JDK 8 (Zulu) with Maven cache
         uses: actions/setup-java@v4
         with:
           distribution: zulu
           java-version: '8'
+          cache: 'maven'   # <-- 启用 Maven 本地仓库缓存
+
+      # === 关键：把镜像写在所有 mvn 命令之前 ===
+      - name: Set up Maven mirrors (redirect ALL repos, incl. rubygems, to Aliyun)
+        run: |
+          mkdir -p ~/.m2
+          cat > ~/.m2/settings.xml <<'XML'
+          <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
+                    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                    xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
+            <mirrors>
+              <!-- 先显式镜像 rubygems-releases 到 Aliyun（防止它逃逸） -->
+              <mirror>
+                <id>rubygems-to-aliyun</id>
+                <mirrorOf>rubygems-releases</mirrorOf>
+                <name>Mirror rubygems proxy to Aliyun</name>
+                <url>https://maven.aliyun.com/repository/public</url>
+              </mirror>
+              <!-- 再把所有远程仓库统一镜像到 Aliyun（包含中央/插件/第三方仓库） -->
+              <mirror>
+                <id>aliyun-all</id>
+                <mirrorOf>*</mirrorOf>
+                <name>Aliyun All</name>
+                <url>https://maven.aliyun.com/repository/public</url>
+              </mirror>
+            </mirrors>
+
+            <!-- 可选：强制启用一个只含 central 的 profile，避免 POM 里乱加仓库 -->
+            <profiles>
+              <profile>
+                <id>force-central</id>
+                <activation><activeByDefault>true</activeByDefault></activation>
+                <repositories>
+                  <repository>
+                    <id>central</id>
+                    <url>https://repo1.maven.org/maven2</url>
+                    <releases><enabled>true</enabled></releases>
+                    <snapshots><enabled>false</enabled></snapshots>
+                  </repository>
+                </repositories>
+                <pluginRepositories>
+                  <pluginRepository>
+                    <id>central</id>
+                    <url>https://repo1.maven.org/maven2</url>
+                    <releases><enabled>true</enabled></releases>
+                    <snapshots><enabled>false</enabled></snapshots>
+                  </pluginRepository>
+                </pluginRepositories>
+              </profile>
+            </profiles>
+          </settings>
+          XML
 
       - name: Preinstall SDL libs (macOS)
         if: runner.os == 'macOS'
         run: |
-          mvn install:install-file \
+          mvn $MAVEN_CLI_OPTS install:install-file \
             -Dfile=vendor/sdl-libs-2.0.9-mac.jar \
             -DgroupId=org.datavyu \
             -DartifactId=sdl-libs \
@@ -32,33 +91,15 @@ jobs:
             -Dpackaging=jar \
             -Dclassifier=mac
 
+      # 现在这些诊断命令也会使用我们的 settings.xml，不会再打 otto.takari.io
       - name: Show effective POM
-        run: mvn -B -U -DforceStdout help:effective-pom
+        run: mvn $MAVEN_CLI_OPTS -U -DforceStdout help:effective-pom
 
       - name: Show dependency tree
-        run: mvn -B -U dependency:tree -DoutputType=text
-
-      - name: Set up Maven mirror for faster downloads
-        run: |
-          mkdir -p ~/.m2
-          echo '<settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
-                xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
-                xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0
-                                    https://maven.apache.org/xsd/settings-1.0.0.xsd">
-            <mirrors>
-              <mirror>
-                <id>aliyunmaven</id>
-                <mirrorOf>central</mirrorOf>
-                <name>Aliyun Maven</name>
-                <url>https://maven.aliyun.com/repository/central</url>
-              </mirror>
-            </mirrors>
-          </settings>' > ~/.m2/settings.xml
+        run: mvn $MAVEN_CLI_OPTS -U dependency:tree -DoutputType=text
 
       - name: Build native installers
-        run: mvn -Dmaven.test.skip=true -U clean jfx:native
-        env:
-          MAVEN_OPTS: "-Xmx1g -Dfile.encoding=UTF-8 -Dswing.aatext=true -Dawt.useSystemAAFontSettings=lcd"
+        run: mvn $MAVEN_CLI_OPTS -Dmaven.test.skip=true -U clean jfx:native
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
@@ -67,4 +108,3 @@ jobs:
           path: |
             target/jfx/native/**/*
             target/*.jar
-
