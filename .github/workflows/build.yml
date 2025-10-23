@@ -167,7 +167,7 @@ jobs:
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
             -U clean jfx:jar
 
-      # ====== 组装多个 runtime 候选（含 .jdk/Contents/Home 形态）并逐一尝试 ======
+      # ============ Prepare multiple runtime candidates (macOS) ============
       - name: Prepare multiple runtime candidates (macOS)
         if: runner.os == 'macOS'
         shell: bash
@@ -176,76 +176,64 @@ jobs:
           echo "== JAVA_HOME = $JAVA_HOME"
           ls -la "$JAVA_HOME" || true
 
-          # 候选 1：JDK8 的 JRE
-          C1=""
+          # 用 python3 -c 取绝对真实路径，避免符号链接带来的歧义
+          realpath_py() { /usr/bin/python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"; }
+
+          CAND1="$(realpath_py "$JAVA_HOME")"
+          CANDIDATES="$CAND1"
+
           if [ -d "$JAVA_HOME/jre" ]; then
-            C1="$(/usr/bin/python3 - <<'PY'\nimport os,sys;print(os.path.realpath(sys.argv[1]))\nPY\n "$JAVA_HOME/jre")"
-            echo "C1=$C1"
+            CAND2="$(realpath_py "$JAVA_HOME/jre")"
+            CANDIDATES="$CANDIDATES|$CAND2"
           fi
 
-          # 候选 2：JDK 根
-          C2="$(/usr/bin/python3 - <<'PY'\nimport os,sys;print(os.path.realpath(sys.argv[1]))\nPY\n "$JAVA_HOME")"
-          echo "C2=$C2"
+          echo "Runtime candidates (| 分隔): $CANDIDATES"
 
-          # 候选 3/4：合成 .jdk/Contents/Home 以及其下 jre
-          WRAP_ROOT="$RUNNER_TEMP/macjdk"
-          mkdir -p "$WRAP_ROOT/Contents"
-          # 用硬链接/符号链接均可，这里用符号链接
-          ln -s "$JAVA_HOME" "$WRAP_ROOT/Contents/Home"
-          if [ -d "$JAVA_HOME/jre" ] && [ ! -e "$WRAP_ROOT/Contents/Home/jre" ]; then
-            ln -s "$JAVA_HOME/jre" "$WRAP_ROOT/Contents/Home/jre"
-          fi
-          echo "== Wrapper tree =="
-          find "$WRAP_ROOT" -maxdepth 3 -print
+          # 导出给后续步骤使用。注意：GITHUB_ENV 不支持换行，用 | 作为分隔符。
+          echo "RUNTIME_CANDIDATES=$CANDIDATES" >> "$GITHUB_ENV"
 
-          C3="$WRAP_ROOT/Contents/Home"
-          C4="$WRAP_ROOT/Contents/Home/jre"
+          echo "== Sanity =="
+          IFS='|' read -r -a arr <<< "$CANDIDATES"
+          for R in "${arr[@]}"; do
+            echo "-- $R"
+            if [ -x "$R/bin/java" ]; then "$R/bin/java" -version; fi || true
+            if [ -x "$R/Contents/Home/bin/java" ]; then "$R/Contents/Home/bin/java" -version; fi || true
+          done
 
-          # 汇总导出为以冒号分隔的候选列表
-          LIST=""
-          if [ -n "$C1" ]; then LIST="$C1"; fi
-          LIST="${LIST:+$LIST:}$C2:$C3:$C4"
-          echo "PACKAGER_RUNTIMES=$LIST" >> "$GITHUB_ENV"
-          echo "PACKAGER_RUNTIMES=$LIST"
 
-      # ======================= 构建 DMG/PKG（插件 -> CLI 回退，循环候选） =======================
+      # ======================= Build DMG/PKG (macOS) =======================
       - name: Build DMG/PKG (macOS)
         if: runner.os == 'macOS'
         shell: bash
-        env:
-          PACKAGER_RUNTIMES: ${{ env.PACKAGER_RUNTIMES }}
         run: |
           set -euo pipefail
-          IFS=':' read -r -a RUNTIMES <<< "${PACKAGER_RUNTIMES}"
-          if [ ${#RUNTIMES[@]} -eq 0 ]; then
-            echo "✘ No runtime candidates prepared"; exit 1
-          fi
+          echo "RUNTIME_CANDIDATES=${RUNTIME_CANDIDATES:-<unset>}"
 
-          echo "== jfx appdir =="
+          echo "== Show jfx appdir inputs =="
           ls -la target/jfx/app || true
           find target/jfx/app -maxdepth 2 -type f -name "*-jfx.jar" -print || true
 
           produced=""
-          # 逐一尝试每个 runtime
-          for R in "${RUNTIMES[@]}"; do
-            echo "---- TRY WITH RUNTIME: $R ----"
-            if [ -x "$R/bin/java" ]; then "$R/bin/java" -version || true; fi
-            if [ -x "$R/Contents/Home/bin/java" ]; then "$R/Contents/Home/bin/java" -version || true; fi
-            echo "-- tree of runtime (depth 3) --"
-            find "$R" -maxdepth 3 -print || true
 
-            echo ">> Try javafx-maven-plugin ..."
+          IFS='|' read -r -a CANDS <<< "${RUNTIME_CANDIDATES:-$JAVA_HOME}"
+          for R in "${CANDS[@]}"; do
+            [ -d "$R" ] || continue
+            echo "---- TRY RUNTIME: $R ----"
+            [ -x "$R/bin/java" ] && "$R/bin/java" -version || true
+            [ -x "$R/Contents/Home/bin/java" ] && "$R/Contents/Home/bin/java" -version || true
+
+            echo ">> Try javafx-maven-plugin (-Djre + bundlerArgs runtime,...)"
             mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
               -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
               -U jfx:native \
+              -Djfx.native=true \
+              -Djfx.native.bundlers="DMG Installer,PKG Installer" \
               -Djavafx.mainClass="${APP_MAIN}" \
               -Djavafx.appName="${APP_NAME}" \
               -Djavafx.vendor="${APP_VENDOR}" \
               -Djavafx.verbose=true \
-              -Djavafx.native=true \
-              -Djavafx.bundleType="dmg" \
               -Djre="$R" \
-              -DbundlerArgs="-Bruntime=$R -Bidentifier=org.datavyu -Bmac.sign=false" || true
+              -Djfx.native.bundlerArgs="runtime,${R},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" || true
 
             if find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | grep -q . ; then
               produced="plugin"
@@ -253,7 +241,7 @@ jobs:
               break
             fi
 
-            echo ">> Plugin did not produce DMG/PKG. Try javapackager CLI ..."
+            echo ">> Plugin didn't produce artifacts. Try javapackager CLI (-Bruntime=$R) ..."
             APPDIR="target/jfx/app"
             JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1 || true)
             if [ -z "$JFXJAR" ]; then
@@ -271,7 +259,7 @@ jobs:
               -outfile "${APP_NAME}" \
               -Bidentifier=org.datavyu \
               -Bmac.sign=false \
-              -Bruntime="$R" || true
+              -Bruntime="${R}" || true
 
             find target/packager -type f \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} target/ \; || true
             if find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | grep -q . ; then
@@ -284,19 +272,17 @@ jobs:
           echo "== FINAL DMG/PKG =="
           if [ -z "$produced" ]; then
             echo "✘ Still no DMG/PKG produced. Failing the build."
-            echo "== DEBUG: Dump all candidates =="
-            idx=0
-            for R in "${RUNTIMES[@]}"; do
-              idx=$((idx+1))
-              echo "--- CANDIDATE #$idx: $R ---"
+            echo "== DEBUG: dump candidates =="
+            for R in "${CANDS[@]}"; do
+              echo "--- $R ---"
               [ -x "$R/bin/java" ] && "$R/bin/java" -version || true
               [ -x "$R/Contents/Home/bin/java" ] && "$R/Contents/Home/bin/java" -version || true
-              find "$R" -maxdepth 4 -print || true
+              find "$R" -maxdepth 3 -print || true
             done
-            echo "== DEBUG: javapackager version =="
             "$JAVA_HOME/bin/javapackager" -version || true
             exit 1
           fi
+
 
       # ============================== Windows: 产出 EXE/MSI ==============================
       - name: Build EXE/MSI (Windows)
