@@ -920,7 +920,7 @@ public final class Datavyu extends SingleFrameApplication implements KeyEventDis
 
             logger.debug("Application Name: Datavyu"
                 + " ,Application Version: " + resourceMap.getString("Application.version")
-                + " ,OS Name: "Dystem.getProperty("os.name")
+                + " ,OS Name: "+ System.getProperty("os.name")
                 + " ,OS Version: " + System.getProperty("os.version")
                 + " ,Java Version: " + System.getProperty("java.version"));
 
