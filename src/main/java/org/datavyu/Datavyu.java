@@ -169,12 +169,49 @@ public final class Datavyu extends SingleFrameApplication implements KeyEventDis
      * @param args The command line arguments passed to Datavyu.
      */
     public static void main(final String[] args) {
+        // ★ GEMINI: START OF MODIFICATION - 注册 CJK 字体
+        // 在任何 UI 创建之前调用字体注册方法，以确保 Swing 组件（如电子表格）能显示中文
+        installCJKUIFont();
+        // ★ GEMINI: END OF MODIFICATION
+
         // If we are running on a MAC set system properties
         if (Datavyu.getPlatform() == Platform.MAC) {
             System.setProperty("Quaqua.jniIsPreloaded", "true");
         }
         launch(Datavyu.class, args);
     }
+
+    // ★ GEMINI: START OF MODIFICATION - 添加 CJK 字体安装方法
+    // 注册并统一设置支持中文的字体
+    private static void installCJKUIFont() {
+        try {
+            // 加载内嵌在 resources/fonts 下的字体（你已经把 DejaVuSansCondensed.ttf 换成中文字体）
+            java.io.InputStream fontStream = Datavyu.class.getResourceAsStream("/fonts/DejaVuSansCondensed.ttf");
+            java.awt.Font base = java.awt.Font.createFont(java.awt.Font.TRUETYPE_FONT, fontStream);
+            java.awt.GraphicsEnvironment.getLocalGraphicsEnvironment().registerFont(base);
+            java.awt.Font ui = base.deriveFont(java.awt.Font.PLAIN, 13f);
+
+            // 覆盖常用 Swing 组件的默认字体
+            javax.swing.UIManager.put("Label.font",          new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("TextField.font",      new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("TextArea.font",       new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("EditorPane.font",     new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("FormattedTextField.font", new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("Table.font",          new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("TableHeader.font",    new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("List.font",           new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("Menu.font",           new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("MenuItem.font",       new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("CheckBoxMenuItem.font", new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("Button.font",         new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("ToggleButton.font",   new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("ToolTip.font",        new javax.swing.plaf.FontUIResource(ui));
+            javax.swing.UIManager.put("TitledBorder.font",   new javax.swing.plaf.FontUIResource(ui));
+        } catch (Exception e) {
+            e.printStackTrace();
+        }
+    }
+    // ★ GEMINI: END OF MODIFICATION
 
     // TODO: Why do we have these two project controllers?
     public static ProjectController getProjectController() {
@@ -697,7 +734,7 @@ public final class Datavyu extends SingleFrameApplication implements KeyEventDis
 
                         int selectedOption = JOptionPane.showOptionDialog(mainFrame,
                                 resourceMap.getString("UnsavedDialog.message",projectName),
-                                resourceMap.getString("UnsavedDialog.title"),
+                                resourceMap.getString("UnDavedDialog.title"),
                                 JOptionPane.YES_NO_CANCEL_OPTION, JOptionPane.QUESTION_MESSAGE,
                                 null, options, yesOption);
 
@@ -883,7 +920,7 @@ public final class Datavyu extends SingleFrameApplication implements KeyEventDis
 
             logger.debug("Application Name: Datavyu"
                 + " ,Application Version: " + resourceMap.getString("Application.version")
-                + " ,OS Name: " + System.getProperty("os.name")
+                + " ,OS Name: "Dystem.getProperty("os.name")
                 + " ,OS Version: " + System.getProperty("os.version")
                 + " ,Java Version: " + System.getProperty("java.version"));
 
