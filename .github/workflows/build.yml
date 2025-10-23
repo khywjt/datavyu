@@ -224,46 +224,115 @@ jobs:
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
             -U clean jfx:jar
 
-      # ===== macOS：生成 DMG/PKG =====
-      - name: Build DMG/PKG (macOS)
+      # ======================= Build DMG/PKG (macOS) — final =======================
+      - name: Build DMG/PKG (macOS) — final
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          echo "Using runtime: ${MACOS_RUNTIME_HOME:-<unset>}"
+          APP_NAME="${APP_NAME:-Datavyu}"
+          APP_MAIN="${APP_MAIN:-org.datavyu.Datavyu}"
+          APP_VENDOR="${APP_VENDOR:-Datavyu}"
 
-          # 首选：插件打包（传入 jre 与 bundlerArgs）
+          # 1) 选择 runtime（优先使用苹果风 JDK 的 Contents/Home）
+          APPLE_JAVA_HOME="${APPLE_JAVA_HOME:-$JAVA_HOME}"
+          if [ -d "$RUNNER_TEMP/jdk8fx.jdk/Contents/Home" ]; then
+            APPLE_JAVA_HOME="$RUNNER_TEMP/jdk8fx.jdk/Contents/Home"
+          fi
+          echo "Using runtime: $APPLE_JAVA_HOME"
+          "$APPLE_JAVA_HOME/bin/java" -version
+
+          # 2) 清理 OpenJFX 15 的 jar，避免与 JDK8 自带 jfxrt.jar 冲突
+          if [ -d target/jfx/app/lib ]; then
+            rm -f target/jfx/app/lib/javafx-*-15*.jar || true
+          fi
+
+          # 3) 先用插件打包（正确传入 -Djre=…/Contents/Home）
           mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
+            -U jfx:native \
             -Djfx.native=true \
             -Djfx.native.bundlers="DMG Installer,PKG Installer" \
             -Djavafx.mainClass="${APP_MAIN}" \
             -Djavafx.appName="${APP_NAME}" \
             -Djavafx.vendor="${APP_VENDOR}" \
             -Djavafx.verbose=true \
-            -Djre="${MACOS_RUNTIME_HOME}" \
-            -Djfx.native.bundlerArgs="runtime,${MACOS_RUNTIME_HOME},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" \
-            jfx:native
+            -Djre="$APPLE_JAVA_HOME" \
+            -Djfx.native.bundlerArgs="runtime,${APPLE_JAVA_HOME},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" || true
 
-          # 回退：CLI（极少数情况下用）
-          if ! find target -maxdepth 5 -type f \( -name "*.dmg" -o -name "*.pkg" \) | grep -q . ; then
-            echo "Plugin produced nothing, trying CLI fallback..."
-            APPDIR="target/jfx/app"
-            JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1)
-            test -n "$JFXJAR"
-            mkdir -p target/packager
-            "$JAVA_HOME/bin/javapackager" -deploy -native dmg \
-              -name "${APP_NAME}" -appclass "${APP_MAIN}" \
-              -srcdir "$(dirname "$JFXJAR")" -srcfiles "$(basename "$JFXJAR")" \
-              -outdir target/packager -outfile "${APP_NAME}" \
-              -Bidentifier=org.datavyu -Bmac.sign=false \
-              -Bruntime="${MACOS_RUNTIME_HOME}"
-            find target/packager -type f \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} target/ \; || true
+          produced=""
+          if find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | grep -q . ; then
+            produced="plugin"
+            echo "✔ DMG/PKG produced by plugin."
           fi
 
-          # 最终校验
-          find target -maxdepth 5 -type f \( -name "*.dmg" -o -name "*.pkg" \) -print
-          test $(find target -maxdepth 5 -type f \( -name "*.dmg" -o -name "*.pkg" \) | wc -l) -ge 1
+          # 4) CLI 回退（只在插件没产出时）
+          if [ -z "$produced" ]; then
+            echo "Plugin produced nothing, trying CLI fallback..."
+
+            APPDIR="target/jfx/app"
+            JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1 || true)
+            if [ -z "$JFXJAR" ]; then
+              echo "✘ Cannot find *-jfx.jar under $APPDIR/Datavyu"
+              exit 1
+            fi
+
+            # 4.1 用 javapackager 产出基础 .app
+            mkdir -p target/packager
+            "$JAVA_HOME/bin/javapackager" -deploy \
+              -native dmg \
+              -name "${APP_NAME}" \
+              -appclass "${APP_MAIN}" \
+              -srcdir "$(dirname "$JFXJAR")" \
+              -srcfiles "$(basename "$JFXJAR")" \
+              -outdir target/packager \
+              -outfile "${APP_NAME}" \
+              -Bidentifier=org.datavyu \
+              -Bmac.sign=false \
+              -Bruntime="${APPLE_JAVA_HOME}" || true
+
+            # 4.2 补全 .app/Contents/Java（拷入 Datavyu/ 与 lib/ 并生成 Datavyu.cfg）
+            APP_BUNDLE=$(find target/packager -type d -name "*.app" | head -n1 || true)
+            if [ -z "$APP_BUNDLE" ]; then
+              echo "✘ CLI didn't create an .app bundle; cannot continue."
+              exit 1
+            fi
+            APP_JAVA="$APP_BUNDLE/Contents/Java"
+            mkdir -p "$APP_JAVA"
+            rsync -a "$APPDIR/lib" "$APP_JAVA/"
+            rsync -a "$APPDIR/Datavyu" "$APP_JAVA/"
+
+            cat > "$APP_JAVA/Datavyu.cfg" <<'CFG'
+                  [Application]
+                  app.name=Datavyu
+                  app.mainclass=org.datavyu.Datavyu
+                  [JavaOptions]
+                  -Xmx1g
+                  [ClassPath]
+                  Datavyu/*.jar:lib/*
+                  CFG
+
+            # 4.3 重新打 DMG（保证 DMG 内含补全后的 .app）
+            DMG_OUT="target/${APP_NAME}-unofficial.dmg"
+            rm -f "$DMG_OUT"
+            mkdir -p target/dmgroot
+            rsync -a "$APP_BUNDLE" "target/dmgroot/"
+            hdiutil create -volname "${APP_NAME}" -srcfolder target/dmgroot -ov -format UDZO "$DMG_OUT"
+
+            produced="cli"
+            echo "✔ DMG rebuilt at $DMG_OUT"
+          fi
+
+          # 5) 验包：必须存在 .app 且包含 Datavyu/ 与 lib/
+          APP_FOUND=$(find target -type d -name "*.app" | head -n1 || true)
+          if [ -z "$APP_FOUND" ]; then
+            echo "✘ No .app found after build"; exit 1
+          fi
+          if [ ! -d "$APP_FOUND/Contents/Java/Datavyu" ] || [ ! -d "$APP_FOUND/Contents/Java/lib" ]; then
+            echo "✘ App bundle missing Contents/Java/Datavyu or Contents/Java/lib"; exit 1
+          fi
+          echo "✔ App structure OK: $APP_FOUND"
+
 
       # ===== Windows：产出 EXE/MSI =====
       - name: Build EXE/MSI (Windows)
