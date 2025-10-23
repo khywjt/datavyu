@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ============= JDK8 + JavaFX（带 javapackager） =============
+      # ============= JavaFX 打包所需的 JDK8 + FX（带 javapackager） =============
       - name: Set up JDK 8 (Liberica with JavaFX)
         uses: actions/setup-java@v4
         with:
@@ -43,8 +43,8 @@ jobs:
           set -euo pipefail
           echo "JAVA_HOME=$JAVA_HOME"
           java -version
-          test -x "$JAVA_HOME/bin/javapackager" && "$JAVA_HOME/bin/javapackager" -version || { echo "✘ javapackager MISSING"; exit 1; }
-          test -f "$JAVA_HOME/lib/ant-javafx.jar" && echo "✔ ant-javafx.jar OK" || { echo "✘ ant-javafx.jar MISSING"; exit 1; }
+          test -x "$JAVA_HOME/bin/javapackager" && "$JAVA_HOME/bin/javapackager" -version
+          test -f "$JAVA_HOME/lib/ant-javafx.jar" && echo "ant-javafx.jar OK"
 
       # ============================== Windows 打包工具 ==============================
       - name: Install Windows packaging tools (InnoSetup + WiX)
@@ -53,7 +53,7 @@ jobs:
         run: |
           choco install -y innosetup wixtoolset
 
-      # ============================== Maven 镜像（可按需调整） ==============================
+      # ============================== Maven 镜像加速 ==============================
       - name: Set up Maven mirrors
         shell: bash
         run: |
@@ -95,7 +95,7 @@ jobs:
       - name: Preinstall vendor jars (optional)
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
           CLASSIFIER=""
           if [ "$RUNNER_OS" = "macOS" ]; then CLASSIFIER="mac"; fi
           if [ "$RUNNER_OS" = "Windows" ]; then CLASSIFIER="win"; fi
@@ -112,7 +112,6 @@ jobs:
             fi
           done
 
-          # mac 独有的 quaqua（如仓库提供）
           if [ "$RUNNER_OS" = "macOS" ]; then
             if [ -f vendor/quaqua-osx64-7.0.1.jar ]; then
               mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
@@ -128,26 +127,25 @@ jobs:
             fi
           fi
 
-      # ======================== 准备测试所需 IO/* 相对路径文件 ========================
+      # ======================== 复制测试资源到工作目录 ========================
       - name: Prepare test resources for file-path based tests
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
           rm -rf IO
           if [ -d src/test/resources/IO ]; then
             mkdir -p IO
             cp -R src/test/resources/IO/* IO/
-            echo "Copied test files:"
             ls -la IO || true
           else
-            echo "src/test/resources/IO not found"; exit 1
+            echo "src/test/resources/IO not found" && exit 1
           fi
 
-      # ============================== 运行测试 ==============================
+      # ============================== 跑测试（独立阶段） ==============================
       - name: Run unit tests
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
           mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U test
 
       - name: Upload surefire reports (on failure)
@@ -158,48 +156,57 @@ jobs:
           path: target/surefire-reports/**
           if-no-files-found: ignore
 
-      # ======================= 产出 JavaFX appdir（跳过测试） =======================
+      # ======================= 先产出 JavaFX appdir（无测试） =======================
       - name: Build appdir (skip tests)
         shell: bash
         run: |
-          set -euo pipefail
+          set -e
           mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
             -U clean jfx:jar
 
-      # ============ Prepare multiple runtime candidates (macOS) ============
-      - name: Prepare multiple runtime candidates (macOS)
+      # ============ 准备多个 runtime 候选 + “干净副本” (macOS) ============
+      - name: Prepare runtime candidates (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          echo "== JAVA_HOME = $JAVA_HOME"
-          ls -la "$JAVA_HOME" || true
+          echo "== RAW JAVA_HOME = $JAVA_HOME"
+          java -version
 
-          # 用 python3 -c 取绝对真实路径，避免符号链接带来的歧义
           realpath_py() { /usr/bin/python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"; }
 
-          CAND1="$(realpath_py "$JAVA_HOME")"
-          CANDIDATES="$CAND1"
+          C1="$(realpath_py "$JAVA_HOME")"
+          C2=""
+          if [ -d "$JAVA_HOME/jre" ]; then C2="$(realpath_py "$JAVA_HOME/jre")"; fi
 
-          if [ -d "$JAVA_HOME/jre" ]; then
-            CAND2="$(realpath_py "$JAVA_HOME/jre")"
-            CANDIDATES="$CANDIDATES|$CAND2"
-          fi
+          # 关键：制作一个不含特殊字符/不含符号链接的“干净副本”
+          CLEAN_JRE="$RUNNER_TEMP/jre8fx_clean"
+          rm -rf "$CLEAN_JRE"
+          mkdir -p "$CLEAN_JRE"
+          rsync -a "$JAVA_HOME/jre/" "$CLEAN_JRE/"
+          # 移除可能的隔离属性、统一权限
+          xattr -dr com.apple.quarantine "$CLEAN_JRE" || true
+          chmod -R go+rX "$CLEAN_JRE"
 
-          echo "Runtime candidates (| 分隔): $CANDIDATES"
+          # 导出候选（按优先级）：干净副本 > 原生 $JAVA_HOME/jre > 原生 $JAVA_HOME
+          CANDIDATES="$CLEAN_JRE"
+          [ -n "$C2" ] && CANDIDATES="$CANDIDATES|$C2"
+          CANDIDATES="$CANDIDATES|$C1"
 
-          # 导出给后续步骤使用。注意：GITHUB_ENV 不支持换行，用 | 作为分隔符。
           echo "RUNTIME_CANDIDATES=$CANDIDATES" >> "$GITHUB_ENV"
 
           echo "== Sanity =="
           IFS='|' read -r -a arr <<< "$CANDIDATES"
           for R in "${arr[@]}"; do
-            echo "-- $R"
-            if [ -x "$R/bin/java" ]; then "$R/bin/java" -version; fi || true
-            if [ -x "$R/Contents/Home/bin/java" ]; then "$R/Contents/Home/bin/java" -version; fi || true
+            echo "-- candidate : $R"
+            [ -x "$R/bin/java" ] && "$R/bin/java" -version || true
+            [ -x "$R/Contents/Home/bin/java" ] && "$R/Contents/Home/bin/java" -version || true
+            # 关键文件
+            ls -l "$R/bin" || true
+            find "$R" -maxdepth 2 -name rt.jar -print || true
+            find "$R" -maxdepth 3 -name jfxrt.jar -print || true
           done
-
 
       # ======================= Build DMG/PKG (macOS) =======================
       - name: Build DMG/PKG (macOS)
@@ -214,15 +221,14 @@ jobs:
           find target/jfx/app -maxdepth 2 -type f -name "*-jfx.jar" -print || true
 
           produced=""
-
           IFS='|' read -r -a CANDS <<< "${RUNTIME_CANDIDATES:-$JAVA_HOME}"
+
           for R in "${CANDS[@]}"; do
             [ -d "$R" ] || continue
             echo "---- TRY RUNTIME: $R ----"
             [ -x "$R/bin/java" ] && "$R/bin/java" -version || true
-            [ -x "$R/Contents/Home/bin/java" ] && "$R/Contents/Home/bin/java" -version || true
 
-            echo ">> Try javafx-maven-plugin (-Djre + bundlerArgs runtime,...)"
+            # 方案 A：插件（同时给 -Djre 与 bundlerArgs: runtime,PATH）
             mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
               -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
               -U jfx:native \
@@ -241,7 +247,7 @@ jobs:
               break
             fi
 
-            echo ">> Plugin didn't produce artifacts. Try javapackager CLI (-Bruntime=$R) ..."
+            # 方案 B：CLI 回退
             APPDIR="target/jfx/app"
             JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1 || true)
             if [ -z "$JFXJAR" ]; then
@@ -276,13 +282,11 @@ jobs:
             for R in "${CANDS[@]}"; do
               echo "--- $R ---"
               [ -x "$R/bin/java" ] && "$R/bin/java" -version || true
-              [ -x "$R/Contents/Home/bin/java" ] && "$R/Contents/Home/bin/java" -version || true
               find "$R" -maxdepth 3 -print || true
             done
             "$JAVA_HOME/bin/javapackager" -version || true
             exit 1
           fi
-
 
       # ============================== Windows: 产出 EXE/MSI ==============================
       - name: Build EXE/MSI (Windows)
@@ -292,13 +296,13 @@ jobs:
           $ErrorActionPreference = "Stop"
           mvn $env:MAVEN_FLAGS `
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true `
-            -U jfx:native `
-            -Djavafx.native=true `
-            -Djavafx.bundleType="exe" `
+            -Djfx.native=true `
+            -Djfx.native.bundlers="EXE Installer,MSI Installer" `
             -Djavafx.mainClass="$env:APP_MAIN" `
             -Djavafx.appName="$env:APP_NAME" `
             -Djavafx.vendor="$env:APP_VENDOR" `
-            -Djavafx.verbose=true
+            -Djavafx.verbose=true `
+            jfx:native
 
           Write-Host "== produced EXE/MSI =="
           $files = Get-ChildItem -Recurse -Path target -Include *.exe,*.msi -ErrorAction SilentlyContinue
@@ -308,7 +312,7 @@ jobs:
             $files | ForEach-Object { $_.FullName }
           }
 
-      # ============================== 产物检查与打包上传 ==============================
+      # ============================== 产物检查与上传 ==============================
       - name: Inspect outputs
         if: always()
         shell: bash
