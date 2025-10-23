@@ -103,7 +103,7 @@ jobs:
           for f in vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar \
                    vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar ; do
             if [ -f "$f" ]; then
-              AID=$(basename "$f" | sed -E 's/-[0-9].*//')   # 简单取 artifactId
+              AID=$(basename "$f" | sed -E 's/-[0-9].*//')    # 简单取 artifactId
               VER=$(basename "$f" | sed -E 's/.*-([0-9][^.]*(\.[0-9]+)*)[^/]*\.jar/\1/')
               mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
                 -Dfile="$f" -DgroupId=org.datavyu -DartifactId="$AID" \
@@ -133,17 +133,36 @@ jobs:
         run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U dependency:tree -DoutputType=text
 
       # 6) 强制做 native：mac=dmg，win=exe；并显式指定 mainClass/appName/vendor
+      # ★★★ 这是被修改的步骤 ★★★
       - name: Build native installers
         shell: bash
         run: |
-          if [ "$RUNNER_OS" = "macOS" ]; then BUNDLE=dmg; else BUNDLE=exe; fi
+          # 默认 EXTRA_ARGS 为空
+          EXTRA_ARGS=""
+          
+          # 为 Windows 和 macOS 设置 JRE 路径 (修复 "Cannot determine which JRE/JDK" 错误)
+          JRE_PATH_ARG="-Djavafx.javaRuntime=${JAVA_HOME}"
+
+          if [ "$RUNNER_OS" = "macOS" ]; then 
+            BUNDLE=dmg
+            # 1. 跳过代码签名 (修复签名失败)
+            # 2. 显式指定 JRE 路径
+            EXTRA_ARGS="-Djavafx.mac.signing=false ${JRE_PATH_ARG}"
+          else 
+            BUNDLE=exe
+            # Windows 也需要 JRE 路径
+            EXTRA_ARGS="${JRE_PATH_ARG}"
+          fi
+
+          # 注意：在末尾添加了 $EXTRA_ARGS
           mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -Dmaven.test.skip=true -U clean \
             jfx:jar jfx:native \
             -Djavafx.mainClass="${APP_MAIN}" \
             -Djavafx.appName="${APP_NAME}" \
             -Djavafx.vendor="${APP_VENDOR}" \
             -Djavafx.bundleType="${BUNDLE}" \
-            -Djavafx.verbose=true
+            -Djavafx.verbose=true \
+            $EXTRA_ARGS
 
       # 7) 列出现有产物
       - name: Inspect outputs
