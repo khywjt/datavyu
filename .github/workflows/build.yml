@@ -170,48 +170,109 @@ jobs:
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
             -U clean jfx:jar
 
-      # ============================== macOS: 产出 DMG/PKG ==============================
-      - name: Build DMG/PKG (macOS)
+      # 先验证 JavaFX 工具是否齐全（保留你已有的 Setup Java 步骤）
+      - name: Verify JavaFX tools
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
           echo "JAVA_HOME=$JAVA_HOME"
-          # 对于 Liberica JDK8（带 FX），这里就是 Contents/Home；符合打包器要求
-          RUNTIME_DIR="$JAVA_HOME"
+          java -version
+          # JDK8 + FX 必须带 ant-javafx.jar & javapackager
+          test -f "$JAVA_HOME/lib/ant-javafx.jar" && echo "ant-javafx.jar OK" || { echo "ant-javafx.jar MISSING"; exit 1; }
+          test -x "$JAVA_HOME/bin/javapackager" && "$JAVA_HOME/bin/javapackager" -version || { echo "javapackager MISSING"; exit 1; }
       
-          echo "== Verify packager tools =="
-          test -x "$JAVA_HOME/bin/javapackager" && "$JAVA_HOME/bin/javapackager" -version || { echo "javapackager missing"; exit 1; }
-          test -f "$JAVA_HOME/lib/ant-javafx.jar" && echo "ant-javafx.jar OK" || { echo "ant-javafx.jar missing"; exit 1; }
+      # 明确探测并验证打包用的 runtime，并导出为 PACKAGER_RUNTIME
+      - name: Check JRE/JDK runtime for packager (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "== Inspect JAVA_HOME =="
+          echo "JAVA_HOME=$JAVA_HOME"
+          ls -la "$JAVA_HOME" || true
+          echo "== Probe JAVA_HOME layout =="
+          # 常见候选：优先用 $JAVA_HOME/jre（JDK8 下存在）；否则用 $JAVA_HOME
+          CANDIDATES=()
+          if [ -d "$JAVA_HOME/jre" ]; then CANDIDATES+=("$JAVA_HOME/jre"); fi
+          CANDIDATES+=("$JAVA_HOME")
+      
+          PICK=""
+          for d in "${CANDIDATES[@]}"; do
+            echo "-- probing $d"
+            # 要求：存在 bin/java（runtime）或 Contents/Home/bin/java（bundle），以及核心库目录
+            if [ -x "$d/bin/java" ] || [ -x "$d/Contents/Home/bin/java" ]; then
+              # JDK8 打包器还会检查一些传统文件/目录
+              if [ -d "$d/lib" ] || [ -d "$d/jre/lib" ] || [ -d "$d/Contents/Home/lib" ]; then
+                PICK="$d"
+                break
+              fi
+            fi
+          done
+      
+          if [ -z "$PICK" ]; then
+            echo "✘ No usable runtime directory found for packager."
+            echo "Dump JAVA_HOME tree (depth 2) to help diagnose:"
+            find "$JAVA_HOME" -maxdepth 2 -type d -print
+            exit 1
+          fi
+      
+          echo "✔ Selected runtime for packager: $PICK"
+      
+          echo "== Sanity check on selected runtime =="
+          if [ -x "$PICK/bin/java" ]; then "$PICK/bin/java" -version; fi
+          if [ -x "$PICK/Contents/Home/bin/java" ]; then "$PICK/Contents/Home/bin/java" -version; fi
+      
+          echo "== List key files =="
+          ls -la "$PICK/bin" || true
+          # JDK8 with FX 通常还会有 jfxrt.jar（随发行版不同，不一定必须）
+          find "$PICK" -maxdepth 3 -type f \( -name "jfxrt.jar" -o -name "libjfx*.dylib" \) -print || true
+      
+          # 导出给后续步骤使用
+          echo "PACKAGER_RUNTIME=$PICK" >> "$GITHUB_ENV"
+      
+      # 用插件打 DMG/PKG；失败就回退到 CLI；仍失败则报错
+      - name: Build DMG/PKG (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        env:
+          PACKAGER_RUNTIME: ${{ env.PACKAGER_RUNTIME }}
+        run: |
+          set -euo pipefail
+          echo "PACKAGER_RUNTIME=${PACKAGER_RUNTIME:-<unset>}"
       
           echo "== Show jfx appdir inputs =="
           ls -la target/jfx/app || true
           find target/jfx/app -maxdepth 2 -type f -name "*-jfx.jar" -print || true
       
-          echo "== Try via javafx-maven-plugin =="
-          mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
+          echo "== Try via javafx-maven-plugin with -Djre =="
+          # 关键：插件直接吃 -Djre=...
+          if ! mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
-            -Djavafx.mainClass="${APP_MAIN}" \
-            -Djavafx.appName="${APP_NAME}" \
-            -Djavafx.vendor="${APP_VENDOR}" \
-            -Djavafx.verbose=true \
-            -Djavafx.bundlers="DMG Installer,PKG Installer,Mac Application Image" \
-            -Djavafx.bundlerArgs="runtime,${RUNTIME_DIR},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" \
-            -Djavafx.runtime="${RUNTIME_DIR}" \
-            jfx:native
+            -DmainClass="${APP_MAIN}" \
+            -DappName="${APP_NAME}" \
+            -Dvendor="${APP_VENDOR}" \
+            -Didentifier="org.datavyu" \
+            -Dverbose=true \
+            -Dbundler="DMG Installer,PKG Installer,Mac Application Image" \
+            -Djre="${PACKAGER_RUNTIME}" \
+            jfx:native ; then
+            echo "Plugin path failed, will fallback to javapackager CLI..."
+          fi
       
           echo "== produced DMG/PKG after plugin =="
-          FOUND=$(find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | wc -l | tr -d ' ')
-          if [ "$FOUND" = "0" ]; then
+          if find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | grep -q . ; then
+            echo "✔ DMG/PKG produced by plugin"
+          else
             echo "No DMG/PKG produced by plugin. Fallback to javapackager CLI ..."
-            # 取到 jfx 打包好的可运行 jar（形如 Datavyu/datavyu-*-jfx.jar）
             APPDIR="target/jfx/app"
-            JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1)
+            JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1 || true)
             if [ -z "$JFXJAR" ]; then
-              echo "Cannot find *-jfx.jar under $APPDIR/Datavyu"; exit 1
+              echo "✘ Cannot find *-jfx.jar under $APPDIR/Datavyu"; exit 1
             fi
       
             mkdir -p target/packager
+            # CLI 需要 -Bruntime=...；优先给出你选中的 runtime
             "$JAVA_HOME/bin/javapackager" -deploy \
               -native dmg \
               -name "${APP_NAME}" \
@@ -222,18 +283,19 @@ jobs:
               -outfile "${APP_NAME}" \
               -Bidentifier=org.datavyu \
               -Bmac.sign=false \
-              -Bruntime="${RUNTIME_DIR}"
+              -Bruntime="${PACKAGER_RUNTIME}"
       
-            # 把生成好的 DMG/PKG 收集到 target 方便上传
+            # 收集到 target 根目录便于上传
             find target/packager -type f \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} target/ \; || true
           fi
       
-          FINAL=$(find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | wc -l | tr -d ' ')
-          if [ "$FINAL" = "0" ]; then
-            echo "✘ Still no DMG/PKG produced. Failing the build."; exit 1
-          fi
           echo "== FINAL DMG/PKG =="
-          find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) -print
+          if ! find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) -print | tee /dev/stderr | grep -q . ; then
+            echo "✘ Still no DMG/PKG produced. Failing the build."
+            echo "== DEBUG: dump PACKAGER_RUNTIME structure (depth 3) =="
+            find "${PACKAGER_RUNTIME}" -maxdepth 3 -print || true
+            exit 1
+          fi
 
 
       # ============================== Windows: 产出 EXE/MSI ==============================
