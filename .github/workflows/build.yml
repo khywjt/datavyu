@@ -28,7 +28,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ============= JavaFX 打包所需的 JDK8 + FX（带 javapackager） =============
+      # ===== JDK8 + JavaFX (含 javapackager) =====
       - name: Set up JDK 8 (Liberica with JavaFX)
         uses: actions/setup-java@v4
         with:
@@ -46,14 +46,77 @@ jobs:
           test -x "$JAVA_HOME/bin/javapackager" && "$JAVA_HOME/bin/javapackager" -version
           test -f "$JAVA_HOME/lib/ant-javafx.jar" && echo "ant-javafx.jar OK"
 
-      # ============================== Windows 打包工具 ==============================
+      # ===== macOS：构造“真” .jdk/Contents/Home，做预检（失败即早停）=====
+      - name: macOS preflight runtime (fail fast)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # 1) 构造 macOS JDK bundle 目录
+          BUNDLE_ROOT="$RUNNER_TEMP/jdk8fx.jdk"
+          BUNDLE_CNT="$BUNDLE_ROOT/Contents"
+          WRAP_HOME="$BUNDLE_CNT/Home"
+
+          rm -rf "$BUNDLE_ROOT"
+          mkdir -p "$WRAP_HOME"
+
+          echo "== Copy JDK into $WRAP_HOME =="
+          rsync -a "$JAVA_HOME/." "$WRAP_HOME/"
+
+          # 2) 写入最小 Info.plist（部分检测会读取它）
+          cat > "$BUNDLE_CNT/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>DatavyuJDK</string>
+            <key>CFBundleIdentifier</key><string>org.datavyu.jdk8fx</string>
+            <key>CFBundleVersion</key><string>1.8.0_472</string>
+          </dict>
+          </plist>
+          PLIST
+
+          echo "MACOS_RUNTIME_HOME=$WRAP_HOME" >> "$GITHUB_ENV"
+
+          echo "== Sanity =="
+          ls -la "$BUNDLE_CNT"
+          "$WRAP_HOME/bin/java" -version
+          test -f "$WRAP_HOME/jre/lib/rt.jar" && echo "rt.jar OK"
+          test -f "$WRAP_HOME/jre/lib/ext/jfxrt.jar" && echo "jfxrt.jar OK" || true
+
+          # 3) 10 秒小样例预检（避免大项目白编）
+          WORK="$RUNNER_TEMP/jfx-preflight"
+          rm -rf "$WORK" && mkdir -p "$WORK" && cd "$WORK"
+
+          cat > Hello.java <<'JAVA'
+          public class Hello {
+            public static void main(String[] args) { System.out.println("ok"); }
+          }
+          JAVA
+
+          "$WRAP_HOME/bin/javac" Hello.java
+          "$WRAP_HOME/bin/jar" cfe Hello.jar Hello Hello.class
+
+          "$JAVA_HOME/bin/javapackager" -deploy -native image \
+            -name Preflight -appclass Hello \
+            -srcdir . -srcfiles Hello.jar \
+            -outdir out -outfile Preflight \
+            -Bidentifier=org.datavyu.preflight \
+            -Bmac.sign=false \
+            -Bruntime="$WRAP_HOME"
+
+          test -d out || (echo "Preflight failed"; exit 1)
+          echo "Preflight OK (runtime usable)"
+
+      # ===== Windows 打包工具 =====
       - name: Install Windows packaging tools (InnoSetup + WiX)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install -y innosetup wixtoolset
 
-      # ============================== Maven 镜像加速 ==============================
+      # ===== Maven 镜像 =====
       - name: Set up Maven mirrors
         shell: bash
         run: |
@@ -91,7 +154,7 @@ jobs:
           </settings>
           XML
 
-      # ===================== 预装 vendor/ 下的私有 JAR（可选） =====================
+      # ===== 预装 vendor JAR（可选）=====
       - name: Preinstall vendor jars (optional)
         shell: bash
         run: |
@@ -99,7 +162,6 @@ jobs:
           CLASSIFIER=""
           if [ "$RUNNER_OS" = "macOS" ]; then CLASSIFIER="mac"; fi
           if [ "$RUNNER_OS" = "Windows" ]; then CLASSIFIER="win"; fi
-
           for f in vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar \
                    vendor/ffmpeg-libs-4.1.1-${CLASSIFIER}.jar \
                    vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar ; do
@@ -111,42 +173,30 @@ jobs:
                 -Dversion="$VER" -Dpackaging=jar -Dclassifier="${CLASSIFIER}"
             fi
           done
-
           if [ "$RUNNER_OS" = "macOS" ]; then
-            if [ -f vendor/quaqua-osx64-7.0.1.jar ]; then
-              mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
-                -Dfile=vendor/quaqua-osx64-7.0.1.jar \
-                -DgroupId=org.datavyu -DartifactId=quaqua-osx64 \
+            for j in quaqua-osx64-7.0.1.jar quaqua-filechooser-only-7.0.1.jar; do
+              [ -f "vendor/$j" ] && mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+                -Dfile="vendor/$j" -DgroupId=org.datavyu -DartifactId="${j%%-*}" \
                 -Dversion=7.0.1 -Dpackaging=jar
-            fi
-            if [ -f vendor/quaqua-filechooser-only-7.0.1.jar ]; then
-              mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
-                -Dfile=vendor/quaqua-filechooser-only-7.0.1.jar \
-                -DgroupId=org.datavyu -DartifactId=quaqua-filechooser-only \
-                -Dversion=7.0.1 -Dpackaging=jar
-            fi
+            done
           fi
 
-      # ======================== 复制测试资源到工作目录 ========================
+      # ===== 为基于路径的测试准备资源 =====
       - name: Prepare test resources for file-path based tests
         shell: bash
         run: |
           set -e
           rm -rf IO
           if [ -d src/test/resources/IO ]; then
-            mkdir -p IO
-            cp -R src/test/resources/IO/* IO/
-            ls -la IO || true
+            mkdir -p IO && cp -R src/test/resources/IO/* IO/
           else
             echo "src/test/resources/IO not found" && exit 1
           fi
 
-      # ============================== 跑测试（独立阶段） ==============================
+      # ===== 测试（独立阶段）=====
       - name: Run unit tests
         shell: bash
-        run: |
-          set -e
-          mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U test
+        run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U test
 
       - name: Upload surefire reports (on failure)
         if: failure()
@@ -156,139 +206,56 @@ jobs:
           path: target/surefire-reports/**
           if-no-files-found: ignore
 
-      # ======================= 先产出 JavaFX appdir（无测试） =======================
+      # ===== 先产出 JavaFX appdir（跳过测试）=====
       - name: Build appdir (skip tests)
         shell: bash
         run: |
-          set -e
           mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
             -U clean jfx:jar
 
-      # ============ 准备多个 runtime 候选 + “干净副本” (macOS) ============
-      - name: Prepare runtime candidates (macOS)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "== RAW JAVA_HOME = $JAVA_HOME"
-          java -version
-
-          realpath_py() { /usr/bin/python3 -c 'import os,sys;print(os.path.realpath(sys.argv[1]))' "$1"; }
-
-          C1="$(realpath_py "$JAVA_HOME")"
-          C2=""
-          if [ -d "$JAVA_HOME/jre" ]; then C2="$(realpath_py "$JAVA_HOME/jre")"; fi
-
-          # 关键：制作一个不含特殊字符/不含符号链接的“干净副本”
-          CLEAN_JRE="$RUNNER_TEMP/jre8fx_clean"
-          rm -rf "$CLEAN_JRE"
-          mkdir -p "$CLEAN_JRE"
-          rsync -a "$JAVA_HOME/jre/" "$CLEAN_JRE/"
-          # 移除可能的隔离属性、统一权限
-          xattr -dr com.apple.quarantine "$CLEAN_JRE" || true
-          chmod -R go+rX "$CLEAN_JRE"
-
-          # 导出候选（按优先级）：干净副本 > 原生 $JAVA_HOME/jre > 原生 $JAVA_HOME
-          CANDIDATES="$CLEAN_JRE"
-          [ -n "$C2" ] && CANDIDATES="$CANDIDATES|$C2"
-          CANDIDATES="$CANDIDATES|$C1"
-
-          echo "RUNTIME_CANDIDATES=$CANDIDATES" >> "$GITHUB_ENV"
-
-          echo "== Sanity =="
-          IFS='|' read -r -a arr <<< "$CANDIDATES"
-          for R in "${arr[@]}"; do
-            echo "-- candidate : $R"
-            [ -x "$R/bin/java" ] && "$R/bin/java" -version || true
-            [ -x "$R/Contents/Home/bin/java" ] && "$R/Contents/Home/bin/java" -version || true
-            # 关键文件
-            ls -l "$R/bin" || true
-            find "$R" -maxdepth 2 -name rt.jar -print || true
-            find "$R" -maxdepth 3 -name jfxrt.jar -print || true
-          done
-
-      # ======================= Build DMG/PKG (macOS) =======================
+      # ===== macOS：生成 DMG/PKG =====
       - name: Build DMG/PKG (macOS)
         if: runner.os == 'macOS'
         shell: bash
         run: |
           set -euo pipefail
-          echo "RUNTIME_CANDIDATES=${RUNTIME_CANDIDATES:-<unset>}"
+          echo "Using runtime: ${MACOS_RUNTIME_HOME:-<unset>}"
 
-          echo "== Show jfx appdir inputs =="
-          ls -la target/jfx/app || true
-          find target/jfx/app -maxdepth 2 -type f -name "*-jfx.jar" -print || true
+          # 首选：插件打包（传入 jre 与 bundlerArgs）
+          mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
+            -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
+            -Djfx.native=true \
+            -Djfx.native.bundlers="DMG Installer,PKG Installer" \
+            -Djavafx.mainClass="${APP_MAIN}" \
+            -Djavafx.appName="${APP_NAME}" \
+            -Djavafx.vendor="${APP_VENDOR}" \
+            -Djavafx.verbose=true \
+            -Djre="${MACOS_RUNTIME_HOME}" \
+            -Djfx.native.bundlerArgs="runtime,${MACOS_RUNTIME_HOME},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" \
+            jfx:native
 
-          produced=""
-          IFS='|' read -r -a CANDS <<< "${RUNTIME_CANDIDATES:-$JAVA_HOME}"
-
-          for R in "${CANDS[@]}"; do
-            [ -d "$R" ] || continue
-            echo "---- TRY RUNTIME: $R ----"
-            [ -x "$R/bin/java" ] && "$R/bin/java" -version || true
-
-            # 方案 A：插件（同时给 -Djre 与 bundlerArgs: runtime,PATH）
-            mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
-              -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
-              -U jfx:native \
-              -Djfx.native=true \
-              -Djfx.native.bundlers="DMG Installer,PKG Installer" \
-              -Djavafx.mainClass="${APP_MAIN}" \
-              -Djavafx.appName="${APP_NAME}" \
-              -Djavafx.vendor="${APP_VENDOR}" \
-              -Djavafx.verbose=true \
-              -Djre="$R" \
-              -Djfx.native.bundlerArgs="runtime,${R},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" || true
-
-            if find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | grep -q . ; then
-              produced="plugin"
-              echo "✔ Produced by plugin with runtime=$R"
-              break
-            fi
-
-            # 方案 B：CLI 回退
+          # 回退：CLI（极少数情况下用）
+          if ! find target -maxdepth 5 -type f \( -name "*.dmg" -o -name "*.pkg" \) | grep -q . ; then
+            echo "Plugin produced nothing, trying CLI fallback..."
             APPDIR="target/jfx/app"
-            JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1 || true)
-            if [ -z "$JFXJAR" ]; then
-              echo "✘ Cannot find *-jfx.jar under $APPDIR/Datavyu"; exit 1
-            fi
-
+            JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1)
+            test -n "$JFXJAR"
             mkdir -p target/packager
-            "$JAVA_HOME/bin/javapackager" -deploy \
-              -native dmg \
-              -name "${APP_NAME}" \
-              -appclass "${APP_MAIN}" \
-              -srcdir "$(dirname "$JFXJAR")" \
-              -srcfiles "$(basename "$JFXJAR")" \
-              -outdir target/packager \
-              -outfile "${APP_NAME}" \
-              -Bidentifier=org.datavyu \
-              -Bmac.sign=false \
-              -Bruntime="${R}" || true
-
+            "$JAVA_HOME/bin/javapackager" -deploy -native dmg \
+              -name "${APP_NAME}" -appclass "${APP_MAIN}" \
+              -srcdir "$(dirname "$JFXJAR")" -srcfiles "$(basename "$JFXJAR")" \
+              -outdir target/packager -outfile "${APP_NAME}" \
+              -Bidentifier=org.datavyu -Bmac.sign=false \
+              -Bruntime="${MACOS_RUNTIME_HOME}"
             find target/packager -type f \( -name "*.dmg" -o -name "*.pkg" \) -exec cp {} target/ \; || true
-            if find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | grep -q . ; then
-              produced="cli"
-              echo "✔ Produced by CLI with runtime=$R"
-              break
-            fi
-          done
-
-          echo "== FINAL DMG/PKG =="
-          if [ -z "$produced" ]; then
-            echo "✘ Still no DMG/PKG produced. Failing the build."
-            echo "== DEBUG: dump candidates =="
-            for R in "${CANDS[@]}"; do
-              echo "--- $R ---"
-              [ -x "$R/bin/java" ] && "$R/bin/java" -version || true
-              find "$R" -maxdepth 3 -print || true
-            done
-            "$JAVA_HOME/bin/javapackager" -version || true
-            exit 1
           fi
 
-      # ============================== Windows: 产出 EXE/MSI ==============================
+          # 最终校验
+          find target -maxdepth 5 -type f \( -name "*.dmg" -o -name "*.pkg" \) -print
+          test $(find target -maxdepth 5 -type f \( -name "*.dmg" -o -name "*.pkg" \) | wc -l) -ge 1
+
+      # ===== Windows：产出 EXE/MSI =====
       - name: Build EXE/MSI (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -306,13 +273,9 @@ jobs:
 
           Write-Host "== produced EXE/MSI =="
           $files = Get-ChildItem -Recurse -Path target -Include *.exe,*.msi -ErrorAction SilentlyContinue
-          if (-not $files) {
-            Write-Error "No EXE/MSI produced. Failing the build."
-          } else {
-            $files | ForEach-Object { $_.FullName }
-          }
+          if (-not $files) { Write-Error "No EXE/MSI produced. Failing the build." } else { $files | ForEach-Object { $_.FullName } }
 
-      # ============================== 产物检查与上传 ==============================
+      # ===== 产物检查与上传 =====
       - name: Inspect outputs
         if: always()
         shell: bash
