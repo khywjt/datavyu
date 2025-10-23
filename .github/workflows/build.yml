@@ -155,31 +155,41 @@ jobs:
           XML
 
       # ===== 预装 vendor JAR（可选）=====
-      - name: Preinstall vendor jars (optional)
+      - name: Preinstall vendor jars (optional, tolerant)
         shell: bash
         run: |
-          set -e
-          CLASSIFIER=""
-          if [ "$RUNNER_OS" = "macOS" ]; then CLASSIFIER="mac"; fi
-          if [ "$RUNNER_OS" = "Windows" ]; then CLASSIFIER="win"; fi
-          for f in vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar \
-                   vendor/ffmpeg-libs-4.1.1-${CLASSIFIER}.jar \
-                   vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar ; do
-            if [ -f "$f" ]; then
-              AID=$(basename "$f" | sed -E 's/-[0-9].*//')
-              VER=$(basename "$f" | sed -E 's/.*-([0-9][^.]*(\.[0-9]+)*)[^/]*\.jar/\1/')
+          set -Eeuo pipefail
+
+          install_if_present () {
+            local file="$1" aid="$2" ver="$3" classifier="${4:-}"
+            if [[ -f "$file" ]]; then
+              echo "::group::install $file"
               mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
-                -Dfile="$f" -DgroupId=org.datavyu -DartifactId="$AID" \
-                -Dversion="$VER" -Dpackaging=jar -Dclassifier="${CLASSIFIER}"
+                -Dfile="$file" -DgroupId=org.datavyu -DartifactId="$aid" \
+                -Dversion="$ver" -Dpackaging=jar ${classifier:+-Dclassifier="$classifier"}
+              echo "::endgroup::"
+            else
+              echo "• skip (not found): $file"
             fi
-          done
-          if [ "$RUNNER_OS" = "macOS" ]; then
-            for j in quaqua-osx64-7.0.1.jar quaqua-filechooser-only-7.0.1.jar; do
-              [ -f "vendor/$j" ] && mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
-                -Dfile="vendor/$j" -DgroupId=org.datavyu -DartifactId="${j%%-*}" \
-                -Dversion=7.0.1 -Dpackaging=jar
-            done
+          }
+
+          case "$RUNNER_OS" in
+            macOS)   CLASSIFIER=mac ;;
+            Windows) CLASSIFIER=win ;;
+            *)       CLASSIFIER= ;;
+          esac
+
+          install_if_present "vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar" sdl-libs 2.0.9 "$CLASSIFIER"
+          install_if_present "vendor/ffmpeg-libs-4.1.1-${CLASSIFIER}.jar" ffmpeg-libs 4.1.1 "$CLASSIFIER"
+          install_if_present "vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar" ffmpeg-plugin 0.24 "$CLASSIFIER"
+
+          if [[ "$RUNNER_OS" == "macOS" ]]; then
+            install_if_present "vendor/quaqua-osx64-7.0.1.jar" quaqua-osx64 7.0.1
+            install_if_present "vendor/quaqua-filechooser-only-7.0.1.jar" quaqua-filechooser-only 7.0.1
           fi
+
+          echo "vendor preinstall done."
+
 
       # ===== 为基于路径的测试准备资源 =====
       - name: Prepare test resources for file-path based tests
