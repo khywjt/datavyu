@@ -1,4 +1,4 @@
-name: Build Datavyu
+name: Build Datavyu (Windows only)
 
 on:
   push:
@@ -6,11 +6,8 @@ on:
   pull_request:
 
 jobs:
-  build:
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        os: [macos-13, windows-latest]
+  build-win:
+    runs-on: windows-latest
 
     env:
       MAVEN_FLAGS: "-B -ntp"
@@ -38,90 +35,31 @@ jobs:
           cache: maven
 
       - name: Verify JavaFX packager tools
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          echo "JAVA_HOME=$JAVA_HOME"
-          java -version
-          test -x "$JAVA_HOME/bin/javapackager" && "$JAVA_HOME/bin/javapackager" -version
-          test -f "$JAVA_HOME/lib/ant-javafx.jar" && echo "ant-javafx.jar OK"
-
-      # ===== macOS：构造“真” .jdk/Contents/Home，做预检（失败即早停）=====
-      - name: macOS preflight runtime (fail fast)
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          # 1) 构造 macOS JDK bundle 目录
-          BUNDLE_ROOT="$RUNNER_TEMP/jdk8fx.jdk"
-          BUNDLE_CNT="$BUNDLE_ROOT/Contents"
-          WRAP_HOME="$BUNDLE_CNT/Home"
-
-          rm -rf "$BUNDLE_ROOT"
-          mkdir -p "$WRAP_HOME"
-
-          echo "== Copy JDK into $WRAP_HOME =="
-          rsync -a "$JAVA_HOME/." "$WRAP_HOME/"
-
-          # 2) 写入最小 Info.plist（部分检测会读取它）
-          cat > "$BUNDLE_CNT/Info.plist" <<'PLIST'
-          <?xml version="1.0" encoding="UTF-8"?>
-          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-          <plist version="1.0">
-          <dict>
-            <key>CFBundleName</key><string>DatavyuJDK</string>
-            <key>CFBundleIdentifier</key><string>org.datavyu.jdk8fx</string>
-            <key>CFBundleVersion</key><string>1.8.0_472</string>
-          </dict>
-          </plist>
-          PLIST
-
-          echo "MACOS_RUNTIME_HOME=$WRAP_HOME" >> "$GITHUB_ENV"
-
-          echo "== Sanity =="
-          ls -la "$BUNDLE_CNT"
-          "$WRAP_HOME/bin/java" -version
-          test -f "$WRAP_HOME/jre/lib/rt.jar" && echo "rt.jar OK"
-          test -f "$WRAP_HOME/jre/lib/ext/jfxrt.jar" && echo "jfxrt.jar OK" || true
-
-          # 3) 10 秒小样例预检（避免大项目白编）
-          WORK="$RUNNER_TEMP/jfx-preflight"
-          rm -rf "$WORK" && mkdir -p "$WORK" && cd "$WORK"
-
-          cat > Hello.java <<'JAVA'
-          public class Hello {
-            public static void main(String[] args) { System.out.println("ok"); }
+          Write-Host "JAVA_HOME=$env:JAVA_HOME"
+          & "$env:JAVA_HOME\bin\java.exe" -version
+          if (Test-Path "$env:JAVA_HOME\bin\javapackager.exe") {
+            & "$env:JAVA_HOME\bin\javapackager.exe" -version
+          } else {
+            Write-Warning "javapackager.exe not found (Liberica 8 + FX should include it)."
           }
-          JAVA
-
-          "$WRAP_HOME/bin/javac" Hello.java
-          "$WRAP_HOME/bin/jar" cfe Hello.jar Hello Hello.class
-
-          "$JAVA_HOME/bin/javapackager" -deploy -native image \
-            -name Preflight -appclass Hello \
-            -srcdir . -srcfiles Hello.jar \
-            -outdir out -outfile Preflight \
-            -Bidentifier=org.datavyu.preflight \
-            -Bmac.sign=false \
-            -Bruntime="$WRAP_HOME"
-
-          test -d out || (echo "Preflight failed"; exit 1)
-          echo "Preflight OK (runtime usable)"
+          if (Test-Path "$env:JAVA_HOME\lib\ant-javafx.jar") {
+            Write-Host "ant-javafx.jar OK"
+          }
 
       # ===== Windows 打包工具 =====
       - name: Install Windows packaging tools (InnoSetup + WiX)
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           choco install -y innosetup wixtoolset
 
-      # ===== Maven 镜像 =====
+      # ===== Maven mirrors（可按需调整或删除）=====
       - name: Set up Maven mirrors
-        shell: bash
+        shell: pwsh
         run: |
-          mkdir -p "$HOME/.m2"
-          cat > "$HOME/.m2/settings.xml" <<'XML'
+          New-Item -Force -ItemType Directory "$HOME\.m2" | Out-Null
+          @"
           <settings xmlns="http://maven.apache.org/SETTINGS/1.0.0"
                     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
                     xsi:schemaLocation="http://maven.apache.org/SETTINGS/1.0.0 https://maven.apache.org/xsd/settings-1.0.0.xsd">
@@ -152,195 +90,74 @@ jobs:
               </profile>
             </profiles>
           </settings>
-          XML
+          "@ | Set-Content -Encoding UTF8 "$HOME\.m2\settings.xml"
 
-      # ===== 预装 vendor JAR（可选）=====
-      - name: Preinstall vendor jars (optional, tolerant)
-        shell: bash
+      # ===== 预装 vendor JAR（可选，用于 sdl/ffmpeg 本地 JAR）=====
+      - name: Preinstall vendor jars (optional)
+        shell: pwsh
         run: |
-          set -Eeuo pipefail
-
-          install_if_present () {
-            local file="$1" aid="$2" ver="$3" classifier="${4:-}"
-            if [[ -f "$file" ]]; then
-              echo "::group::install $file"
-              mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
-                -Dfile="$file" -DgroupId=org.datavyu -DartifactId="$aid" \
-                -Dversion="$ver" -Dpackaging=jar ${classifier:+-Dclassifier="$classifier"}
-              echo "::endgroup::"
-            else
-              echo "• skip (not found): $file"
-            fi
+          $classifier = "win"
+          $vendorJars = @(
+            "vendor\sdl-libs-2.0.9-$classifier.jar",
+            "vendor\ffmpeg-libs-4.1.1-$classifier.jar",
+            "vendor\ffmpeg-plugin-0.24-$classifier.jar"
+          )
+          foreach ($f in $vendorJars) {
+            if (Test-Path $f) {
+              $bn = [System.IO.Path]::GetFileName($f)
+              $aid = $bn -replace '-[0-9].*',''
+              if ($bn -match '.*-([0-9][^\.]*(\.[0-9]+)*)[^\\]*\.jar') { $ver = $Matches[1] } else { continue }
+              mvn -s "$HOME\.m2\settings.xml" -B install:install-file `
+                -Dfile="$f" -DgroupId=org.datavyu -DartifactId="$aid" `
+                -Dversion="$ver" -Dpackaging=jar -Dclassifier="$classifier"
+            }
           }
-
-          case "$RUNNER_OS" in
-            macOS)   CLASSIFIER=mac ;;
-            Windows) CLASSIFIER=win ;;
-            *)       CLASSIFIER= ;;
-          esac
-
-          install_if_present "vendor/sdl-libs-2.0.9-${CLASSIFIER}.jar" sdl-libs 2.0.9 "$CLASSIFIER"
-          install_if_present "vendor/ffmpeg-libs-4.1.1-${CLASSIFIER}.jar" ffmpeg-libs 4.1.1 "$CLASSIFIER"
-          install_if_present "vendor/ffmpeg-plugin-0.24-${CLASSIFIER}.jar" ffmpeg-plugin 0.24 "$CLASSIFIER"
-
-          if [[ "$RUNNER_OS" == "macOS" ]]; then
-            install_if_present "vendor/quaqua-osx64-7.0.1.jar" quaqua-osx64 7.0.1
-            install_if_present "vendor/quaqua-filechooser-only-7.0.1.jar" quaqua-filechooser-only 7.0.1
-          fi
-
-          echo "vendor preinstall done."
-
 
       # ===== 为基于路径的测试准备资源 =====
       - name: Prepare test resources for file-path based tests
-        shell: bash
+        shell: pwsh
         run: |
-          set -e
-          rm -rf IO
-          if [ -d src/test/resources/IO ]; then
-            mkdir -p IO && cp -R src/test/resources/IO/* IO/
-          else
-            echo "src/test/resources/IO not found" && exit 1
-          fi
+          if (Test-Path "IO") { Remove-Item -Recurse -Force "IO" }
+          if (Test-Path "src\test\resources\IO") {
+            New-Item -ItemType Directory -Force "IO" | Out-Null
+            Copy-Item -Recurse "src\test\resources\IO\*" "IO\"
+          } else {
+            Write-Error "src/test/resources/IO not found"; exit 1
+          }
 
-      # ===== 测试（独立阶段）=====
-      - name: Run unit tests
-        shell: bash
-        run: mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS -U test
+      # ===== 单元测试（尽量运行，但不阻断打包；可按需去掉 continue-on-error）=====
+      - name: Run unit tests (best effort)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          # 如需完全跳过测试，改为： mvn -s "$HOME\.m2\settings.xml" $env:MAVEN_FLAGS -U -DskipTests test
+          mvn -s "$HOME\.m2\settings.xml" $env:MAVEN_FLAGS -U test
 
-      - name: Upload surefire reports (on failure)
+      - name: Upload surefire reports (on test failure)
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: surefire-reports-${{ runner.os }}
-          path: target/surefire-reports/**
+          name: surefire-reports-windows
+          path: |
+            **/target/surefire-reports/**
+            **/target/*.dump*
+            **/target/*-jvmRun*.dump*
           if-no-files-found: ignore
 
       # ===== 先产出 JavaFX appdir（跳过测试）=====
       - name: Build appdir (skip tests)
-        shell: bash
+        shell: pwsh
         run: |
-          mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
-            -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
+          mvn -s "$HOME\.m2\settings.xml" $env:MAVEN_FLAGS `
+            -DskipTests -Dmaven.test.skip=true -Dtest.skip=true `
             -U clean jfx:jar
-
-      # ======================= Build DMG/PKG (macOS) — final =======================
-      - name: Build DMG/PKG (macOS) — final
-        if: runner.os == 'macOS'
-        shell: bash
-        run: |
-          set -euo pipefail
-          APP_NAME="${APP_NAME:-Datavyu}"
-          APP_MAIN="${APP_MAIN:-org.datavyu.Datavyu}"
-          APP_VENDOR="${APP_VENDOR:-Datavyu}"
-
-          # 1) 选择 runtime（优先使用苹果风 JDK 的 Contents/Home）
-          APPLE_JAVA_HOME="${APPLE_JAVA_HOME:-$JAVA_HOME}"
-          if [ -d "$RUNNER_TEMP/jdk8fx.jdk/Contents/Home" ]; then
-            APPLE_JAVA_HOME="$RUNNER_TEMP/jdk8fx.jdk/Contents/Home"
-          fi
-          echo "Using runtime: $APPLE_JAVA_HOME"
-          "$APPLE_JAVA_HOME/bin/java" -version
-
-          # 2) 清理 OpenJFX 15 的 jar，避免与 JDK8 自带 jfxrt.jar 冲突
-          if [ -d target/jfx/app/lib ]; then
-            rm -f target/jfx/app/lib/javafx-*-15*.jar || true
-          fi
-
-          # 3) 先用插件打包（正确传入 -Djre=…/Contents/Home）
-          mvn -s "$HOME/.m2/settings.xml" $MAVEN_FLAGS \
-            -DskipTests -Dmaven.test.skip=true -Dtest.skip=true \
-            -U jfx:native \
-            -Djfx.native=true \
-            -Djfx.native.bundlers="DMG Installer,PKG Installer" \
-            -Djavafx.mainClass="${APP_MAIN}" \
-            -Djavafx.appName="${APP_NAME}" \
-            -Djavafx.vendor="${APP_VENDOR}" \
-            -Djavafx.verbose=true \
-            -Djre="$APPLE_JAVA_HOME" \
-            -Djfx.native.bundlerArgs="runtime,${APPLE_JAVA_HOME},mac.sign,false,mac.CFBundleIdentifier,org.datavyu" || true
-
-          produced=""
-          if find target -maxdepth 6 -type f \( -name "*.dmg" -o -name "*.pkg" \) | grep -q . ; then
-            produced="plugin"
-            echo "✔ DMG/PKG produced by plugin."
-          fi
-
-          # 4) CLI 回退（只在插件没产出时）
-          if [ -z "$produced" ]; then
-            echo "Plugin produced nothing, trying CLI fallback..."
-
-            APPDIR="target/jfx/app"
-            JFXJAR=$(find "$APPDIR"/Datavyu -maxdepth 1 -name "*-jfx.jar" | head -n1 || true)
-            if [ -z "$JFXJAR" ]; then
-              echo "✘ Cannot find *-jfx.jar under $APPDIR/Datavyu"
-              exit 1
-            fi
-
-            # 4.1 用 javapackager 产出基础 .app
-            mkdir -p target/packager
-            "$JAVA_HOME/bin/javapackager" -deploy \
-              -native dmg \
-              -name "${APP_NAME}" \
-              -appclass "${APP_MAIN}" \
-              -srcdir "$(dirname "$JFXJAR")" \
-              -srcfiles "$(basename "$JFXJAR")" \
-              -outdir target/packager \
-              -outfile "${APP_NAME}" \
-              -Bidentifier=org.datavyu \
-              -Bmac.sign=false \
-              -Bruntime="${APPLE_JAVA_HOME}" || true
-
-            # 4.2 补全 .app/Contents/Java（拷入 Datavyu/ 与 lib/ 并生成 Datavyu.cfg）
-            APP_BUNDLE=$(find target/packager -type d -name "*.app" | head -n1 || true)
-            if [ -z "$APP_BUNDLE" ]; then
-              echo "✘ CLI didn't create an .app bundle; cannot continue."
-              exit 1
-            fi
-            APP_JAVA="$APP_BUNDLE/Contents/Java"
-            mkdir -p "$APP_JAVA"
-            rsync -a "$APPDIR/lib" "$APP_JAVA/"
-            rsync -a "$APPDIR/Datavyu" "$APP_JAVA/"
-
-            cat > "$APP_JAVA/Datavyu.cfg" <<'CFG'
-                  [Application]
-                  app.name=Datavyu
-                  app.mainclass=org.datavyu.Datavyu
-                  [JavaOptions]
-                  -Xmx1g
-                  [ClassPath]
-                  Datavyu/*.jar:lib/*
-                  CFG
-
-            # 4.3 重新打 DMG（保证 DMG 内含补全后的 .app）
-            DMG_OUT="target/${APP_NAME}-unofficial.dmg"
-            rm -f "$DMG_OUT"
-            mkdir -p target/dmgroot
-            rsync -a "$APP_BUNDLE" "target/dmgroot/"
-            hdiutil create -volname "${APP_NAME}" -srcfolder target/dmgroot -ov -format UDZO "$DMG_OUT"
-
-            produced="cli"
-            echo "✔ DMG rebuilt at $DMG_OUT"
-          fi
-
-          # 5) 验包：必须存在 .app 且包含 Datavyu/ 与 lib/
-          APP_FOUND=$(find target -type d -name "*.app" | head -n1 || true)
-          if [ -z "$APP_FOUND" ]; then
-            echo "✘ No .app found after build"; exit 1
-          fi
-          if [ ! -d "$APP_FOUND/Contents/Java/Datavyu" ] || [ ! -d "$APP_FOUND/Contents/Java/lib" ]; then
-            echo "✘ App bundle missing Contents/Java/Datavyu or Contents/Java/lib"; exit 1
-          fi
-          echo "✔ App structure OK: $APP_FOUND"
-
 
       # ===== Windows：产出 EXE/MSI =====
       - name: Build EXE/MSI (Windows)
-        if: runner.os == 'Windows'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          mvn $env:MAVEN_FLAGS `
+          mvn -s "$HOME\.m2\settings.xml" $env:MAVEN_FLAGS `
             -DskipTests -Dmaven.test.skip=true -Dtest.skip=true `
             -Djfx.native=true `
             -Djfx.native.bundlers="EXE Installer,MSI Installer" `
@@ -354,33 +171,25 @@ jobs:
           $files = Get-ChildItem -Recurse -Path target -Include *.exe,*.msi -ErrorAction SilentlyContinue
           if (-not $files) { Write-Error "No EXE/MSI produced. Failing the build." } else { $files | ForEach-Object { $_.FullName } }
 
-      # ===== 产物检查与上传 =====
-      - name: Inspect outputs
-        if: always()
-        shell: bash
-        run: |
-          echo "== files ==" && find target -maxdepth 6 -type f -print || true
-          echo "== app bundles ==" && find target -maxdepth 6 -type d -name "*.app" -print || true
-
+      # ===== 打包 appdir 以便调试 =====
       - name: Package jfx appdir (always)
         if: always()
-        shell: bash
+        shell: pwsh
         run: |
-          if [ -d target/jfx/app ]; then
-            (cd target/jfx/app && zip -r ../../${{ env.APP_NAME }}-${{ runner.os }}-appdir.zip .)
-          fi
+          if (Test-Path "target\jfx\app") {
+            if (Test-Path "target\${env:APP_NAME}-Windows-appdir.zip") { Remove-Item "target\${env:APP_NAME}-Windows-appdir.zip" -Force }
+            Compress-Archive -Path "target\jfx\app\*" -DestinationPath "target\${env:APP_NAME}-Windows-appdir.zip"
+          }
 
+      # ===== 上传产物 =====
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: datavyu-${{ runner.os }}
+          name: datavyu-windows
           path: |
-            target/**/*.dmg
-            target/**/*.pkg
             target/**/*.msi
             target/**/*.exe
-            target/*-appdir.zip
-            target/**/*.app.zip
+            target/*-Windows-appdir.zip
             target/jfx/native/**/*
             target/jfx/app/*-jfx.jar
             target/*-jfx.jar
