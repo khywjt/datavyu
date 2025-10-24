@@ -10,7 +10,7 @@ jobs:
     runs-on: windows-latest
 
     env:
-      MAVEN_FLAGS: "-B -ntp"
+      # 不再使用 MAVEN_FLAGS，避免被 PowerShell 误切分
       MAVEN_OPTS: >-
         -Xmx2g
         -Dfile.encoding=UTF-8
@@ -25,7 +25,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ===== JDK8 + JavaFX (含 javapackager) =====
+      # ===== JDK8 + JavaFX =====
       - name: Set up JDK 8 (Liberica with JavaFX)
         uses: actions/setup-java@v4
         with:
@@ -92,27 +92,23 @@ jobs:
           </settings>
           "@ | Set-Content -Encoding UTF8 "$HOME\.m2\settings.xml"
 
-      # ===== 预装 vendor JAR（Windows）=====
+      # ===== 预装 vendor JAR（用 bash，避免 pwsh 续行/转义坑）=====
       - name: Preinstall vendor jars (Windows)
         if: runner.os == 'Windows'
         shell: bash
         run: |
           set -euo pipefail
-      
           mkdir -p "$HOME/.m2"
-      
-          # 明确三类 Windows JAR
           jars=(
             "vendor/ffmpeg-libs-4.1.1-win.jar"
             "vendor/ffmpeg-plugin-0.24-win.jar"
             "vendor/sdl-libs-2.0.9-win.jar"
           )
-      
           for f in "${jars[@]}"; do
             if [[ -f "$f" ]]; then
-              AID=$(basename "$f" | sed -E 's/-[0-9].*//')                # → ffmpeg-libs / ffmpeg-plugin / sdl-libs
-              VER=$(basename "$f" | sed -E 's/.*-([0-9][^-.]*([.][0-9]+)*).*-win\.jar/\1/')
-              mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+              AID=$(basename "$f" | sed -E 's/-[0-9].*//')
+              VER=$(basename "$f" | sed -E 's/.*-([0-9][^-.]*([\.][0-9]+)*).*-win\.jar/\1/')
+              mvn -s "$HOME/.m2/settings.xml" -B -ntp install:install-file \
                 -Dfile="$f" \
                 -DgroupId="org.datavyu" \
                 -DartifactId="$AID" \
@@ -121,9 +117,10 @@ jobs:
                 -Dclassifier="win"
             fi
           done
+          # 可视化确认坐标
+          ls -R "$HOME/.m2/repository/org/datavyu" || true
 
-
-      # ===== 为基于路径的测试准备资源 =====
+      # ===== 准备测试资源 =====
       - name: Prepare test resources for file-path based tests
         shell: pwsh
         run: |
@@ -135,13 +132,18 @@ jobs:
             Write-Error "src/test/resources/IO not found"; exit 1
           }
 
-      # ===== 单元测试（尽量运行，但不阻断打包；可按需去掉 continue-on-error）=====
+      # ===== 运行测试（尽量运行，不阻断打包）=====
       - name: Run unit tests (best effort)
         shell: pwsh
         continue-on-error: true
         run: |
-          # 如需完全跳过测试，改为： mvn -s "$HOME\.m2\settings.xml" $env:MAVEN_FLAGS -U -DskipTests test
-          mvn -s "$HOME\.m2\settings.xml" $env:MAVEN_FLAGS -U test
+          $args = @(
+            "-s", "$HOME\.m2\settings.xml",
+            "-B", "-ntp",
+            "-U",
+            "test"
+          )
+          & mvn @args
 
       - name: Upload surefire reports (on test failure)
         if: failure()
@@ -158,25 +160,34 @@ jobs:
       - name: Build appdir (skip tests)
         shell: pwsh
         run: |
-          mvn -s "$HOME\.m2\settings.xml" $env:MAVEN_FLAGS `
-            -DskipTests -Dmaven.test.skip=true -Dtest.skip=true `
-            -U clean jfx:jar
+          $args = @(
+            "-s", "$HOME\.m2\settings.xml",
+            "-B", "-ntp",
+            "-U",
+            "-DskipTests", "-Dmaven.test.skip=true", "-Dtest.skip=true",
+            "clean", "jfx:jar"
+          )
+          & mvn @args
 
-      # ===== Windows：产出 EXE/MSI =====
+      # ===== 产出 EXE/MSI =====
       - name: Build EXE/MSI (Windows)
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          mvn -s "$HOME\.m2\settings.xml" $env:MAVEN_FLAGS `
-            -DskipTests -Dmaven.test.skip=true -Dtest.skip=true `
-            -Djfx.native=true `
-            -Djfx.native.bundlers="EXE Installer,MSI Installer" `
-            -Djavafx.mainClass="$env:APP_MAIN" `
-            -Djavafx.appName="$env:APP_NAME" `
-            -Djavafx.vendor="$env:APP_VENDOR" `
-            -Djavafx.verbose=true `
-            jfx:native
-
+          $args = @(
+            "-s", "$HOME\.m2\settings.xml",
+            "-B", "-ntp",
+            "-U",
+            "-DskipTests", "-Dmaven.test.skip=true", "-Dtest.skip=true",
+            "-Djfx.native=true",
+            '-Djfx.native.bundlers=EXE Installer,MSI Installer',
+            "-Djavafx.verbose=true",
+            "-Djavafx.mainClass=$env:APP_MAIN",
+            "-Djavafx.appName=$env:APP_NAME",
+            "-Djavafx.vendor=$env:APP_VENDOR",
+            "jfx:native"
+          )
+          & mvn @args
           Write-Host "== produced EXE/MSI =="
           $files = Get-ChildItem -Recurse -Path target -Include *.exe,*.msi -ErrorAction SilentlyContinue
           if (-not $files) { Write-Error "No EXE/MSI produced. Failing the build." } else { $files | ForEach-Object { $_.FullName } }
@@ -187,8 +198,9 @@ jobs:
         shell: pwsh
         run: |
           if (Test-Path "target\jfx\app") {
-            if (Test-Path "target\${env:APP_NAME}-Windows-appdir.zip") { Remove-Item "target\${env:APP_NAME}-Windows-appdir.zip" -Force }
-            Compress-Archive -Path "target\jfx\app\*" -DestinationPath "target\${env:APP_NAME}-Windows-appdir.zip"
+            $zip = "target\${env:APP_NAME}-Windows-appdir.zip"
+            if (Test-Path $zip) { Remove-Item $zip -Force }
+            Compress-Archive -Path "target\jfx\app\*" -DestinationPath $zip
           }
 
       # ===== 上传产物 =====
