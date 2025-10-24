@@ -92,26 +92,36 @@ jobs:
           </settings>
           "@ | Set-Content -Encoding UTF8 "$HOME\.m2\settings.xml"
 
-      # ===== 预装 vendor JAR（可选，用于 sdl/ffmpeg 本地 JAR）=====
-      - name: Preinstall vendor jars (optional)
-        shell: pwsh
+      # ===== 预装 vendor JAR（Windows）=====
+      - name: Preinstall vendor jars (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
         run: |
-          $classifier = "win"
-          $vendorJars = @(
-            "vendor\sdl-libs-2.0.9-$classifier.jar",
-            "vendor\ffmpeg-libs-4.1.1-$classifier.jar",
-            "vendor\ffmpeg-plugin-0.24-$classifier.jar"
+          set -euo pipefail
+      
+          mkdir -p "$HOME/.m2"
+      
+          # 明确三类 Windows JAR
+          jars=(
+            "vendor/ffmpeg-libs-4.1.1-win.jar"
+            "vendor/ffmpeg-plugin-0.24-win.jar"
+            "vendor/sdl-libs-2.0.9-win.jar"
           )
-          foreach ($f in $vendorJars) {
-            if (Test-Path $f) {
-              $bn = [System.IO.Path]::GetFileName($f)
-              $aid = $bn -replace '-[0-9].*',''
-              if ($bn -match '.*-([0-9][^\.]*(\.[0-9]+)*)[^\\]*\.jar') { $ver = $Matches[1] } else { continue }
-              mvn -s "$HOME\.m2\settings.xml" -B install:install-file `
-                -Dfile="$f" -DgroupId=org.datavyu -DartifactId="$aid" `
-                -Dversion="$ver" -Dpackaging=jar -Dclassifier="$classifier"
-            }
-          }
+      
+          for f in "${jars[@]}"; do
+            if [[ -f "$f" ]]; then
+              AID=$(basename "$f" | sed -E 's/-[0-9].*//')                # → ffmpeg-libs / ffmpeg-plugin / sdl-libs
+              VER=$(basename "$f" | sed -E 's/.*-([0-9][^-.]*([.][0-9]+)*).*-win\.jar/\1/')
+              mvn -s "$HOME/.m2/settings.xml" -B install:install-file \
+                -Dfile="$f" \
+                -DgroupId="org.datavyu" \
+                -DartifactId="$AID" \
+                -Dversion="$VER" \
+                -Dpackaging=jar \
+                -Dclassifier="win"
+            fi
+          done
+
 
       # ===== 为基于路径的测试准备资源 =====
       - name: Prepare test resources for file-path based tests
